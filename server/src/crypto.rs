@@ -1,8 +1,6 @@
 //! Cryptographic primitives, std only: OS CSPRNG, SHA-1, SHA-256 (scalar + x86_64 SHA-NI),
 //! HMAC-SHA256, PBKDF2-HMAC-SHA256, CRC-32, base64/base64url and hex.
 
-use std::sync::OnceLock;
-
 // ---------------------------------------------------------------------------------------------
 // OS CSPRNG
 // ---------------------------------------------------------------------------------------------
@@ -277,7 +275,7 @@ unsafe fn sha256_compress_ni(state: &mut [u32; 8], blocks: &[u8]) {
 /// Whether the SHA-NI path may be used on this CPU (detected once, cached).
 #[cfg(target_arch = "x86_64")]
 fn has_sha_ni() -> bool {
-    static NI: OnceLock<bool> = OnceLock::new();
+    static NI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *NI.get_or_init(|| {
         is_x86_feature_detected!("sha")
             && is_x86_feature_detected!("sse2")

@@ -27,6 +27,37 @@ native binary with zero third-party code, and every relay holds a full copy of e
 
 Anything marked "Claude" is a default you can overrule. Just say so.
 
+### Names (the user asked for "a name for everything that could have one", 2026-11-06)
+
+| Thing | Name | Notes |
+| --- | --- | --- |
+| 4-char account ID | **Callsign** | `K7Q2`: said out loud like a radio callsign |
+| Conversation request | **Knock** | Accept = **Open the door**; decline = **Ignore** (silent); block = **Bolt** |
+| "Accept requests" switch | **Door** | open / closed |
+| Direct conversation | **Line** | |
+| Group (≤ 128 accounts) | **Crew** | |
+| Personal drive | **Stash** | |
+| Storage / quota | **Tank** | "Tank 96 % full" |
+| Flexible overflow (flex %) | **Spillway** | the bit of extra a full tank lets in |
+| "Always saved" files | **Keepers** | never auto-recycled |
+| The auto-recycler | **Dustin** | the recycling robot; a scheduled cleanup is "Dustin's round" |
+| File that did not fit | **Bounced** | button **Catch it** |
+| Get a recycled/deleted file back | **Rescue** | while anyone still holds it |
+| The 95 % warning | **Red Alert** | |
+| Cleaning Room | **Cleaning Room** | the user's own name |
+| Invite code | **Ticket** | |
+| Account recovery | **Lifeline** | email / code / none |
+| Admin screen | **Control Tower** | |
+| Pre-send previews / image viewer | **Tray** / **Peek** | |
+| Relay network | **The Ring** | |
+| One relay | a **Star** | named after real stars: this box is **Polaris**, then Vega, Sirius, Altair… |
+| Relay join token | **Spark** | "light a new Star" |
+
+Inside the relay: the **Bridge** (state and every rule), the **Logbook** (event logs), the **Hold**
+(file store), the **Gate** (HTTP and WebSocket entrance), the **Lobby** (the embedded web app), the
+**Switchboard** (live pushes), the **Bouncer** (rate limits), the **Courier** (outbound HTTP and
+mail) and the **Ring** (replication).
+
 ---
 
 ## 2. Architecture
