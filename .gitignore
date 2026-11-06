@@ -1,0 +1,7 @@
+target/
+data/
+*.esclog
+/dist/
+.claude/settings.local.json
+.claude/worktrees/
+
