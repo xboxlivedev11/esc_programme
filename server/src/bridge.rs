@@ -379,6 +379,9 @@ impl Bridge {
 
     /// While no admin exists, keep exactly one unexpired admin invite and return its code.
     fn ensure_admin_invite(&self) -> R<Option<String>> {
+        if !self.seeds.is_empty() {
+            return Ok(None); // a joined Star gets its admin from the Ring, never from its own ticket
+        }
         let mut tx = self.begin();
         if tx.st.accounts.values().any(|a| a.admin) {
             return Ok(None);

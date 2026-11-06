@@ -257,7 +257,7 @@ function rpc(m, args = {}) {
   return new Promise((ok, no) => {
     const i = ++WS.seq;
     WS.wait.set(i, { ok, no });
-    const text = JSON.stringify({ i, m, ...args });
+    const text = JSON.stringify({ ...args, i, m });
     if (WS.s && WS.s.readyState === 1) WS.s.send(text);
     else WS.q.push(text);
   });
@@ -542,7 +542,7 @@ function paintRail() {
           'div',
           { class: 'waiting' },
           avatar(k.to, true),
-          h('span', { class: 'grow' }, h('span', { class: 'callsign' }, k.to), ` · knocked ${when(k.t)}`),
+          h('span', { class: 'grow' }, h('span', { class: 'callsign' }, k.to), ` knocked at ${when(k.t)}`),
           h('button', { class: 'btn small ghost', type: 'button', onclick: () => rpc('knock_cancel', { r: k.r }).catch((e) => toast(e.message)) }, 'Cancel'),
         ),
       );
@@ -669,10 +669,10 @@ function routeChanged() {
 function homePane() {
   return h(
     'div',
-    { class: 'scroll' },
+    { class: 'scroll home' },
     h(
       'div',
-      { class: 'empty' },
+      { class: 'home-inner' },
       h('div', { class: 'halyard' }, ...['E', 'S', 'C'].map((c) => flagNode(c))),
       h('p', null, 'Pick a Line or a Crew on the left. Or knock on a callsign to start something new.'),
     ),
@@ -836,10 +836,11 @@ function goneCard(a) {
             class: 'btn small',
             type: 'button',
             onclick: async () => {
+              const was = a.s;
               try {
                 await rpc('file_op', { o: 'get', b: [a.b] });
                 setAttState(a.b, 'ok');
-                toast(a.s === 'ref' ? 'Caught it.' : 'Rescued.');
+                toast(was === 'ref' ? 'Caught it.' : 'Rescued.');
               } catch (e) {
                 toast(e.code === 410 ? 'Nobody holds that file any more.' : e.message);
               }
@@ -1589,7 +1590,7 @@ function crewDialog() {
             e.preventDefault();
             if (!people.take()) return;
             try {
-              const r = await rpc('crew_new', { n: name.value, m: people.list });
+              const r = await rpc('crew_new', { n: name.value, ids: people.list });
               d.close();
               go(`/l/${r.c}`);
               if (people.list.length) toast('Crew created. People join when they accept.');
@@ -1694,7 +1695,7 @@ function crewInfo(conv) {
               onclick: async () => {
                 if (!people.take() || !people.list.length) return;
                 try {
-                  await rpc('crew_invite', { c: conv.c, m: people.list });
+                  await rpc('crew_invite', { c: conv.c, ids: people.list });
                   toast('Invited. They join when they accept.');
                   d.close();
                 } catch (ex) {

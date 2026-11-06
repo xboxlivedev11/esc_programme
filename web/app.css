@@ -353,3 +353,8 @@ table.rows .mini { width: 36px; height: 36px; border-radius: 5px; object-fit: co
 .stack { display: grid; gap: 14px; }
 .big-cs { font-size: 34px; line-height: 1; }
 
+.home { display: grid; place-items: center; }
+.home-inner { display: grid; gap: 14px; justify-items: center; text-align: center; padding: 32px 20px; color: var(--muted); max-width: 420px; }
+.home-inner p { margin: 0; }
+.page input[type="number"], .page select { max-width: 280px; }
+
