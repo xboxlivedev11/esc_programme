@@ -2,3 +2,6 @@
 //! Rust std only. No crates.
 
 pub mod crypto;
+pub mod http;
+pub mod json;
+pub mod ws;
