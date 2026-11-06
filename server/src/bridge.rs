@@ -1858,6 +1858,15 @@ fn valid_email(e: &str) -> bool {
 }
 
 impl Bridge {
+    /// Public facts the welcome screen needs before anyone signs in.
+    pub fn info(&self) -> R<String> {
+        let st = lock(&self.st);
+        let mut js = Js::new();
+        js.obj().ks("signup", st.settings.signup.as_str()).ks("star", &self.name);
+        js.kb("mail", !st.settings.smtp.host.is_empty()).end_obj();
+        Ok(js.finish())
+    }
+
     pub fn notify_grew(&self) {
         let (m, cv) = &self.grew;
         *lock(m) += 1;
@@ -2352,6 +2361,13 @@ mod tests {
             let st = bridge.st.lock().unwrap();
             assert_eq!(st.accounts[&b].usage, 800, "b holds the two newest, recycled the oldest");
             assert_eq!(st.accounts[&a].usage, 800);
+            // Attached files stay on disk (regression: releasing the upload hold before the refs
+            // existed deleted the original), and no upload hold leaks.
+            for (h, blob) in &st.blobs {
+                assert!(bridge.store.has(h), "blob {} vanished from disk", hex(h));
+                assert_eq!(blob.pending, 0);
+            }
+            assert!(st.accounts[&a].uploads.is_empty());
         }
         // b turns auto-recycle off and fills up: the next file is refused, text still arrives.
         bridge.me_set(b, &parse(r#"{"ar":false}"#).unwrap()).unwrap();

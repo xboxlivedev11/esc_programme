@@ -1,0 +1,11 @@
+{
+  "name": "ESC",
+  "short_name": "ESC",
+  "description": "Extremely Simple Communication",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f1f4f6",
+  "theme_color": "#1e4fa3",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

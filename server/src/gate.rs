@@ -48,6 +48,14 @@ fn route(b: &Arc<Bridge>, lobby: &Lobby, req: &Request, conn: &mut Conn) -> io::
             let r = body_json(conn).map(|j| format!("{{\"s\":\"{}\"}}", b.pre(j.s("id").unwrap_or(""))));
             reply(conn, r)
         }
+        ("GET", "/api/me") => match session(b, req) {
+            Some((a, _)) => conn.send_json(200, &format!("{{\"id\":\"{a}\"}}")),
+            None => unauthorized(conn),
+        },
+        ("GET", "/api/info") => {
+            let r = b.info();
+            reply(conn, r)
+        }
         ("POST", "/api/signup") => signup(b, req, conn),
         ("POST", "/api/login") => login(b, req, conn),
         ("POST", "/api/lifeline/code") => {
@@ -284,7 +292,23 @@ fn file(b: &Bridge, req: &Request, conn: &mut Conn) -> io::Result<()> {
     if req.header("if-none-match") == Some(etag.as_str()) {
         return conn.send(304, "", &[("ETag", &etag), ("Cache-Control", "private, max-age=31536000, immutable")], b"");
     }
-    let mime = safe_mime(&mime);
+    // Thumbnails and previews are whatever the sender's browser could encode (WebP, or JPEG/PNG on
+    // browsers without a WebP encoder): read their real type from the first bytes.
+    let sniffed;
+    let mime = if which == "o" {
+        safe_mime(&mime)
+    } else {
+        let mut head = [0u8; 12];
+        let n = std::io::Read::read(&mut f, &mut head).unwrap_or(0);
+        let _ = std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(0));
+        sniffed = match &head[..n] {
+            [0x89, b'P', b'N', b'G', ..] => "image/png",
+            [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+            [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P'] => "image/webp",
+            _ => "application/octet-stream",
+        };
+        sniffed
+    };
     let inline = which != "o" || (inline_ok(mime) && req.param("dl").is_none());
     let disp = format!("{}; filename*=UTF-8''{}", if inline { "inline" } else { "attachment" }, pct_encode(&name));
     let ctype = if mime.starts_with("text/") { format!("{mime}; charset=utf-8") } else { mime.to_string() };

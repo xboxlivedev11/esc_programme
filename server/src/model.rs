@@ -1093,16 +1093,12 @@ impl State {
             return Outcome::Applied;
         }
         // File refs: the sender keeps a copy; recipients per the recorded decisions.
-        if let Some(acc) = self.accounts.get_mut(&from) {
-            for m in &atts {
-                if acc.uploads.remove(&m.b).is_some() {
-                    unpend(&mut self.blobs, &m.b, &mut self.dead_blobs);
-                }
-            }
-        }
         for m in &atts {
             set_file(&mut self.accounts, &mut self.blobs, &mut self.dead_blobs, from, m, FState::Active, b's', Some(c), ev.ts);
         }
+        // Only now do the uploads stop being "pending": the refs above already hold every blob,
+        // so none of them passes through zero holders (which would delete it).
+        self.release_uploads(from, &atts);
         if let Some(Json::Obj(decisions)) = j.get("d") {
             for (who, bits) in decisions {
                 let Some(a) = Aid::parse(who) else { continue };
@@ -1127,12 +1123,8 @@ impl State {
             let Some(meta) = j.get("f").and_then(FileMeta::from_json).map(Arc::new) else {
                 return Outcome::Ignored("file meta");
             };
-            if let Some(acc) = self.accounts.get_mut(&a)
-                && acc.uploads.remove(&meta.b).is_some()
-            {
-                unpend(&mut self.blobs, &meta.b, &mut self.dead_blobs);
-            }
             set_file(&mut self.accounts, &mut self.blobs, &mut self.dead_blobs, a, &meta, FState::Active, b'd', None, ev.ts);
+            self.release_uploads(a, std::slice::from_ref(&meta));
             return Outcome::Applied;
         }
         for h in j.a("b").iter().filter_map(|x| hash_of(x.as_str())) {
@@ -1176,6 +1168,21 @@ impl State {
             }
         }
         Outcome::Applied
+    }
+}
+
+impl State {
+    /// The sender's uploads (original, thumbnail, preview) are attached now: drop their pending holds.
+    /// Call after the file refs exist, so no blob ever passes through zero holders.
+    fn release_uploads(&mut self, who: Aid, metas: &[Arc<FileMeta>]) {
+        let Some(acc) = self.accounts.get_mut(&who) else { return };
+        for m in metas {
+            for b in m.blobs() {
+                if acc.uploads.remove(&b).is_some() {
+                    unpend(&mut self.blobs, &b, &mut self.dead_blobs);
+                }
+            }
+        }
     }
 }
 

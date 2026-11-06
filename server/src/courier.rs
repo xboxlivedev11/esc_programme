@@ -726,6 +726,13 @@ mod tests {
                     if let Some(req) = read_req(&conn) {
                         let w = conn.try_clone().unwrap();
                         handler(req, w);
+                        // Close politely: send FIN, then wait for the client to finish reading and hang up.
+                        // Dropping the socket outright can make Windows answer with RST and destroy
+                        // response bytes still in flight.
+                        let _ = conn.shutdown(std::net::Shutdown::Write);
+                        let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut sink = [0u8; 1024];
+                        while matches!((&conn).read(&mut sink), Ok(n) if n > 0) {}
                     }
                 });
             }
@@ -1171,15 +1178,17 @@ mod tests {
             return;
         }
         let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let m = Mail { host: "127.0.0.1", port: dead, user: "u", pass: "secret-pass", from: "a@b.c", tls: "ssl" };
+        // A password unique to this run, so another test process cannot be mistaken for a leftover file.
+        let pass = format!("secret-{:016x}", random_u64());
+        let m = Mail { host: "127.0.0.1", port: dead, user: "u", pass: &pass, from: "a@b.c", tls: "ssl" };
         let e = send_mail(&m, "x@y.z", "s", "b").unwrap_err();
         assert!(e.to_string().contains("curl smtp failed"), "{e}");
-        assert!(!e.to_string().contains("secret-pass"));
+        assert!(!e.to_string().contains(&pass));
         // No config file is left behind.
         let leftovers = fs::read_dir(std::env::temp_dir())
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("esc-curl-") && fs::read_to_string(e.path()).is_ok_and(|c| c.contains("secret-pass")))
+            .filter(|e| e.file_name().to_string_lossy().starts_with("esc-curl-") && fs::read_to_string(e.path()).is_ok_and(|c| c.contains(&pass)))
             .count();
         assert_eq!(leftovers, 0);
     }
