@@ -260,7 +260,8 @@ impl Tuning {
 /// Live numbers for one peer, shared between its puller thread and `status()`.
 struct PeerStat {
     star: u64,
-    id: u64,
+    /// 0 while the peer is only a seed URL whose Star id is not known yet.
+    id: AtomicU64,
     url: String,
     connected: AtomicBool,
     last_ok: AtomicU64,
@@ -279,7 +280,7 @@ pub fn status() -> Vec<PeerStatus> {
     let mut out: Vec<PeerStatus> = lock(registry())
         .iter()
         .map(|s| PeerStatus {
-            id: s.id,
+            id: s.id.load(Ordering::Relaxed),
             url: s.url.clone(),
             connected: s.connected.load(Ordering::Relaxed),
             last_ok: s.last_ok.load(Ordering::Relaxed),
@@ -287,7 +288,7 @@ pub fn status() -> Vec<PeerStatus> {
             error: lock(&s.error).clone(),
         })
         .collect();
-    out.sort_by_key(|p| p.id);
+    out.sort_by(|a, b| (a.id, &a.url).cmp(&(b.id, &b.url)));
     out
 }
 
@@ -341,25 +342,29 @@ fn start_with(host: Arc<dyn Host>, t: Tuning) {
         });
     }
     let _ = thread::Builder::new().name("ring-peers".into()).stack_size(256 * 1024).spawn(move || {
-        let mut running: HashMap<u64, (String, Arc<AtomicBool>)> = HashMap::new();
+        // Pullers are keyed by URL: seed URLs have no Star id yet (0), and several seeds can coexist.
+        let mut running: HashMap<String, (Arc<PeerStat>, Arc<AtomicBool>)> = HashMap::new();
         loop {
             let peers = host.peers();
             let me = host.me();
-            running.retain(|id, (url, stop)| {
-                let keep = peers.iter().any(|(pid, purl)| pid == id && purl == url);
+            running.retain(|url, (_, stop)| {
+                let keep = peers.iter().any(|(_, purl)| purl == url);
                 if !keep {
                     stop.store(true, Ordering::Relaxed);
                 }
                 keep
             });
             for (id, url) in peers.into_iter().filter(|(id, _)| *id != me) {
-                if running.contains_key(&id) {
+                if let Some((stat, _)) = running.get(&url) {
+                    if id != 0 {
+                        stat.id.store(id, Ordering::Relaxed); // a seed turned out to be a known Star
+                    }
                     continue;
                 }
                 let stop = Arc::new(AtomicBool::new(false));
                 let stat = Arc::new(PeerStat {
                     star: me,
-                    id,
+                    id: AtomicU64::new(id),
                     url: url.clone(),
                     connected: AtomicBool::new(false),
                     last_ok: AtomicU64::new(0),
@@ -368,16 +373,16 @@ fn start_with(host: Arc<dyn Host>, t: Tuning) {
                 });
                 {
                     let mut reg = lock(registry());
-                    reg.retain(|s| !(s.star == me && s.id == id));
+                    reg.retain(|s| !(s.star == me && s.url == url));
                     reg.push(stat.clone());
                 }
-                let (h, s, k) = (host.clone(), stop.clone(), kick.clone());
+                let (h, st, sp, k) = (host.clone(), stat.clone(), stop.clone(), kick.clone());
                 let spawned = thread::Builder::new()
                     .name("ring-pull".into())
                     .stack_size(256 * 1024)
-                    .spawn(move || puller(h.as_ref(), &stat, &s, &k, &t));
+                    .spawn(move || puller(h.as_ref(), &st, &sp, &k, &t));
                 if spawned.is_ok() {
-                    running.insert(id, (url, stop));
+                    running.insert(url, (stat, stop));
                 }
             }
             thread::sleep(t.refresh);
@@ -1007,6 +1012,24 @@ mod tests {
         // Removing the peer stops the puller.
         b.set_peers(&[]);
         wait_until("puller stopped", || !status().iter().any(|p| p.url == ua && p.id == 401));
+    }
+
+    #[test]
+    fn several_seed_urls_without_ids_all_get_pullers() {
+        let (a, c, x) = (TestStar::new(701, KEY), TestStar::new(702, KEY), TestStar::new(703, KEY));
+        let (ua, uc) = (a.serve(), c.serve());
+        a.emit(15);
+        c.emit(9);
+        // Seeds: URLs only, Star id still unknown (0), as a freshly joined Star has them.
+        *lock(&x.peers) = vec![(0, ua.clone()), (0, uc.clone())];
+        start_with(x.clone(), fast());
+        wait_until("both seeds pulled", || x.bytes_of(701) == a.bytes_of(701) && x.bytes_of(702) == c.bytes_of(702) && !x.bytes_of(702).is_empty());
+        let st = status();
+        assert!(st.iter().any(|p| p.url == ua && p.pulled > 0) && st.iter().any(|p| p.url == uc && p.pulled > 0), "{st:?}");
+        // A seed that turns out to be a known Star keeps its puller and learns its id.
+        *lock(&x.peers) = vec![(701, ua.clone()), (0, uc.clone())];
+        wait_until("id learned", || status().iter().any(|p| p.url == ua && p.id == 701));
+        assert!(status().iter().any(|p| p.url == ua && p.connected));
     }
 
     #[test]

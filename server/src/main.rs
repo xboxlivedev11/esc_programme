@@ -18,8 +18,9 @@ const USAGE: &str = "\
 esc - Extremely Simple Communication: a relay, a Star of the Ring
 
 usage:
-  esc serve [--data DIR] [--listen ADDR] [--web DIR]
+  esc serve [--data DIR] [--listen ADDR] [--web DIR] [--tunnel-log FILE]
       Run this Star. The first run creates DIR and prints a one-time admin Ticket.
+      --tunnel-log follows a cloudflared log and announces its public URL to the Ring.
   esc join <url-of-any-star> <spark> [--data DIR] [--url MY_PUBLIC_URL] [--name NAME]
       Light a new Star: join an existing Ring with a Spark from the Control Tower.
   esc version
@@ -31,7 +32,7 @@ fn main() {
     let flag = |name: &str| args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
     let data = PathBuf::from(flag("--data").or_else(|| std::env::var("ESC_DATA").ok()).unwrap_or_else(|| "esc_data".into()));
     let code = match args.first().map(String::as_str).unwrap_or("serve") {
-        "serve" => serve(&data, flag("--listen"), flag("--web").map(PathBuf::from)),
+        "serve" => serve(&data, flag("--listen"), flag("--web").map(PathBuf::from), flag("--tunnel-log").map(PathBuf::from)),
         "join" => join(&data, &args, flag("--url"), flag("--name")),
         "version" | "--version" | "-V" => {
             println!("esc {}", env!("CARGO_PKG_VERSION"));
@@ -49,7 +50,43 @@ fn main() {
     std::process::exit(code);
 }
 
-fn serve(data: &Path, listen: Option<String>, web: Option<PathBuf>) -> i32 {
+/// The last `https://<name>.trycloudflare.com` in a cloudflared log (quick tunnels get a new one on
+/// every start). Other https links in its banner are ignored.
+fn quick_tunnel_url(log: &str) -> Option<String> {
+    let mut found = None;
+    let mut rest = log;
+    while let Some(i) = rest.find("https://") {
+        let tail = &rest[i + 8..];
+        let host: String = tail.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.').collect();
+        if host.ends_with(".trycloudflare.com") && host.len() > ".trycloudflare.com".len() {
+            found = Some(format!("https://{host}"));
+        }
+        rest = &tail[host.len()..];
+    }
+    found
+}
+
+/// Follow cloudflared's log and announce each new public URL to the Ring (and print it).
+fn watch_tunnel(bridge: Arc<Bridge>, log: PathBuf) {
+    let _ = thread::Builder::new().name("tunnel-watch".into()).spawn(move || {
+        let mut last = String::new();
+        loop {
+            if let Ok(text) = fs::read_to_string(&log)
+                && let Some(url) = quick_tunnel_url(&text)
+                && url != last
+            {
+                match bridge.announce_url(&url) {
+                    Ok(()) => println!("  public  {url}"),
+                    Err(e) => eprintln!("esc: could not announce {url}: {}", e.1),
+                }
+                last = url;
+            }
+            thread::sleep(Duration::from_secs(3));
+        }
+    });
+}
+
+fn serve(data: &Path, listen: Option<String>, web: Option<PathBuf>, tunnel_log: Option<PathBuf>) -> i32 {
     if let Err(e) = fs::create_dir_all(data) {
         eprintln!("esc: cannot create {}: {e}", data.display());
         return 1;
@@ -102,9 +139,13 @@ fn serve(data: &Path, listen: Option<String>, web: Option<PathBuf>) -> i32 {
         }
     });
     esc::ring::start(bridge.clone());
+    if let Some(log) = tunnel_log {
+        watch_tunnel(bridge.clone(), log);
+    }
     http::serve(listener, 4096, gate::handler(bridge, lobby));
     0
 }
+
 
 fn join(data: &Path, args: &[String], url: Option<String>, name: Option<String>) -> i32 {
     let (Some(peer), Some(spark)) = (args.get(1), args.get(2)) else {
@@ -180,4 +221,16 @@ fn join(data: &Path, args: &[String], url: Option<String>, name: Option<String>)
     }
     println!("Star \"{star}\" is lit and part of the Ring.\nNow run:  esc serve --data {}", data.display());
     0
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn finds_the_quick_tunnel_url() {
+        let log = "2026-11-06T18:00:00Z INF Thank you for trying Cloudflare Tunnel. See https://developers.cloudflare.com/x\n\
+                   |  https://lazy-otter-blue-sea.trycloudflare.com  |\n\
+                   later: https://new-name-2.trycloudflare.com\n";
+        assert_eq!(super::quick_tunnel_url(log).as_deref(), Some("https://new-name-2.trycloudflare.com"));
+        assert_eq!(super::quick_tunnel_url("https://example.com and https://.trycloudflare.com"), None);
+    }
 }

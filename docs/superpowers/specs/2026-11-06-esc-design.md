@@ -374,6 +374,13 @@ pointer per message.
 
 ## 15. Milestones
 
+Status on 2026-11-06, evening:
+
+- **M1–M3**: built and verified in a browser with two users.
+- **M4**: the admin screen and Lifeline codes work. Email Lifelines need an SMTP account to test.
+- **M5**: the Ring is unit-tested with three Stars; the two-binary e2e test is in progress.
+- **M6**: deploy scripts are written.
+
 1. **M1 Relay core**: crypto, JSON, HTTP, WebSocket, event log, state, accounts, sessions, invites.
 2. **M2 Talking**: requests, direct conversations, groups, messages, history, live push. The web
    app's welcome, main, conversation, requests and settings screens.
@@ -392,3 +399,12 @@ pointer per message.
 - Out of scope for v1, possible later:
   - Background push notifications. The app does notify while it is open.
   - End-to-end encryption, message edit/delete, reactions.
+- Known technical gaps, to address when the Ring has more than one Star:
+  - **Callsign collisions**: two Stars could hand out the same callsign in the same second. Today
+    the later sign-up is ignored on replay. Planned fix: allocate callsigns through one Star.
+  - **Account settings**: concurrent changes to the same account on two Stars apply in arrival
+    order. They are not yet per-field last-writer-wins.
+  - **Startup**: replays the whole Logbook. Snapshots come when that gets slow (months away at
+    this scale).
+  - **Quick tunnel**: the URL changes on every restart. `deploy\status.ps1` prints the current one,
+    and the relay announces it to the Ring. A Cloudflare domain makes it permanent.

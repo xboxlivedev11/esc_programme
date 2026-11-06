@@ -1,8 +1,8 @@
 # ESC programme — rules for every session
 
 ESC = Extremely Simple Communication. The spec is the source of truth:
-`docs/superpowers/specs/2026-11-06-esc-design.md`. Update it whenever a decision changes, and say
-who decided.
+`docs/superpowers/specs/2026-11-06-esc-design.md` (decisions D1–D12, the names glossary, rules
+R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided.
 
 ## Ground rules (from the user)
 
@@ -15,6 +15,10 @@ who decided.
 - **Everything on `master`, edited in place.** The background-job worktree guard is off for this
   repo (`.claude/settings.json`, approved by the user on 2026-11-06). No feature branches.
 - **At most ONE subagent, a Sonnet model**, used only for self-checking modules.
+- **Names**: the user asked for a name for everything (glossary in the spec §1): Callsign, Knock,
+  Line, Crew, Stash, Tank, Spillway, Keepers, Dustin, Bounced/Catch it, Rescue, Red Alert, Ticket,
+  Lifeline, Control Tower, Tray, Peek, the Ring of Stars (Polaris = this box), Spark. Inside:
+  Bridge, Logbook, Hold, Gate, Lobby, Switchboard, Bouncer, Courier.
 - **Ask the user** about product, privacy and their accounts/infrastructure (recommended option
   first), and keep working on everything that doesn't depend on the answer. The user likes to read
   what is being done: keep this file and the spec current, and narrate.
@@ -22,24 +26,61 @@ who decided.
 
 ## Layout
 
-- `server/`: crate `esc`. `src/lib.rs` wires the modules; `src/main.rs` is the CLI
-  (`init`, `serve`, `join`, `admin`).
-- `web/`: static app, embedded into the binary at compile time (`--web <dir>` serves from disk in dev).
-- `docs/superpowers/specs/`: design.
+- `server/`: crate `esc`. `src/lib.rs` lists who is who:
+  - `bridge` holds state and every rule;
+  - `model` is the deterministic `apply()`;
+  - `logbook`, `hold`, `gate`, `lobby`, `ring` and `courier` are the named parts above;
+  - `http`, `ws`, `json`, `crypto` and `ids` are the plumbing.
+
+  `src/main.rs` is the CLI (`serve`, `join`).
+- `web/`: the app (`index.html`, `app.js`, `app.css`, `sw.js`, manifest, icon). It is embedded into
+  the binary at compile time; `--web <dir>` serves it from disk in dev (edit + reload, no rebuild).
+- `deploy/`: `install.ps1` (D:\esc + boot tasks + quick tunnel), `status.ps1`, `uninstall.ps1`.
+- `data/` (gitignored): local scratch, e.g. `data/testfiles` for browser upload tests.
 
 ## Commands
 
 - Tests: `cd server; cargo test --release`
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Release build: `cargo build --release` → `server/target/release/esc.exe`
-- Dev data folder: `D:\esc_data` (D: has the free space; C: is tight)
+- Dev run: `esc serve --data <scratch dir> --listen 127.0.0.1:7878 --web ..\web`, then open the
+  printed `#ticket=` link.
+- Production data folder: `D:\esc_data` (D: has the free space; C: is tight).
+
+## Gotchas learned
+
+- PowerShell `-replace` is case-insensitive; use `-creplace` for code renames.
+- The app's `rpc(m, args)` puts `i`/`m` last so arguments can't overwrite them. Never use `m` or
+  `i` as an RPC argument name.
+- Attach order matters in `model.rs`: create the file refs first, then release the upload
+  ("pending") holds, or a blob passes through zero holders and is deleted.
+- `upload_file` in the browser tool only accepts paths inside the project, so use `data/testfiles`.
 
 ## Current state (newest first)
 
-### 2026-11-06
+### 2026-11-06, evening
 
-- **M0 done:**
+- **Built and verified in Chrome**, two isolated users, desktop and phone, dark and light:
+  - sign-up with a Ticket, Knock and open the door, Lines, Crews (void invites masked);
+  - text with links, files with browser-made thumbnails, Peek, Stash, Cleaning Room;
+  - Bounced, then Catch it; Red Alert (N over C); Dustin recycling the oldest file; Control Tower;
+  - restart replay.
+- **Sizes**: relay binary 1.3 MB including the embedded app; 118 unit tests; clippy clean on
+  Windows, Linux gnu/musl/aarch64 and macOS.
+- **The Ring**: `ring.rs` (Sonnet agent) is tested with three in-process Stars. The real two-binary
+  path (`esc join` + replication) is being covered by e2e tests in `server/tests/e2e.rs`.
+- **Known gaps** (in the spec §16):
+  - Callsign collisions across Stars;
+  - no snapshots (replay grows with the log);
+  - no background push notifications;
+  - account settings are not last-writer-wins across Stars;
+  - email Lifelines are untested until an SMTP account is configured;
+  - HEIC/JXL previews depend on the sender's browser.
+- **Next**: finish the two-Star e2e, then go live on D: with the boot tasks and the quick tunnel.
+
+### 2026-11-06, morning
+
+- **M0 done**:
   - The user decided: Rust std-only, full-mirror ring, Cloudflare quick tunnel (no domain yet),
     server-trusted storage, 4-char IDs, master-only.
-  - Spec written. Crypto module delegated to the Sonnet agent.
-- **Next:** M1 relay core.
+  - Spec written.
