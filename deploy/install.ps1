@@ -15,8 +15,11 @@ if (-not $cloudflared) { $cloudflared = 'C:\Program Files (x86)\cloudflared\clou
 if (-not (Test-Path $cloudflared)) { throw "cloudflared missing: winget install --id Cloudflare.cloudflared -e" }
 
 New-Item -ItemType Directory -Force $Home_, $Data | Out-Null
+# Windows PowerShell 5.1 turns any stderr of a native command into a fatal error under 'Stop':
+# from here on native calls are checked by exit code instead.
+$ErrorActionPreference = 'Continue'
 # Stop running copies so the binary can be replaced.
-foreach ($t in 'ESC Relay', 'ESC Tunnel') { schtasks /end /tn $t 2>$null | Out-Null }
+foreach ($t in 'ESC Relay', 'ESC Tunnel') { cmd /c "schtasks /end /tn `"$t`" >nul 2>&1" }
 Get-Process esc, cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Home_*" -or $_.Path -eq $cloudflared } | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 Copy-Item $exe (Join-Path $Home_ 'esc.exe') -Force
@@ -41,7 +44,9 @@ Copy-Item (Join-Path $PSScriptRoot 'status.ps1') (Join-Path $Home_ 'status.ps1')
 foreach ($pair in @(@('ESC Relay', 'run-relay.ps1'), @('ESC Tunnel', 'run-tunnel.ps1'))) {
   $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Home_\$($pair[1])`""
   schtasks /create /tn $pair[0] /tr $cmd /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Could not create the '$($pair[0])' task (run this from an elevated PowerShell)." }
   schtasks /run /tn $pair[0] | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Could not start the '$($pair[0])' task." }
 }
 Write-Host "Installed. Waiting for the tunnel..."
 Start-Sleep -Seconds 8

@@ -58,6 +58,24 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 
 ## Current state (newest first)
 
+### 2026-11-06, night: LIVE
+
+- **Polaris is live** on this box:
+  - `D:\esc\esc.exe` with data in `D:\esc_data`;
+  - SYSTEM boot tasks "ESC Relay" and "ESC Tunnel" (auto-restart loops; logs in `D:\esc\*.log`);
+  - a Cloudflare quick tunnel whose URL changes on every restart (`D:\esc\status.ps1` prints the
+    current URL and, until an admin exists, the first-admin Ticket).
+- **Verified through the real tunnel** on a throwaway Star:
+  - the Secure cookie;
+  - Cloudflare gzip (app.js is 29.6 KB on the wire);
+  - security headers;
+  - an idle WebSocket lasting 166 s, past Cloudflare's 100 s cut;
+  - automatic URL announce.
+- **Footprint**: the live relay idles at a 6.1 MB working set.
+- **Admin**: no account was created on production. The first admin Ticket is for the user.
+- **Redeploying** after code changes: `cargo build --release`, then `deploy\install.ps1`. It stops
+  the tasks, copies the binary and restarts. The quick-tunnel URL changes when the tunnel restarts.
+
 ### 2026-11-06, evening
 
 - **Built and verified in Chrome**, two isolated users, desktop and phone, dark and light:
