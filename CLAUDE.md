@@ -43,8 +43,9 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 - Tests: `cd server; cargo test --release`
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Release build: `cargo build --release` → `server/target/release/esc.exe`
-- Dev run: `esc serve --data <scratch dir> --listen 127.0.0.1:7878 --web ..\web`, then open the
-  printed `#ticket=` link.
+- Dev run: copy the binary first (a running `target\release\esc.exe` blocks `cargo build`), then
+  `esc serve --data <scratch dir> --listen 127.0.0.1:7979 --web ..\web` and open the printed
+  `#ticket=` link. **Port 7878 is production** (Task Scheduler, SYSTEM): never run dev there.
 - Production data folder: `D:\esc_data` (D: has the free space; C: is tight).
 
 ## Gotchas learned
