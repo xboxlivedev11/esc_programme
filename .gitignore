@@ -4,4 +4,5 @@ data/
 /dist/
 .claude/settings.local.json
 .claude/worktrees/
+esc-paths.ini
 

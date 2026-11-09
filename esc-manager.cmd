@@ -5,9 +5,53 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Host.UI.RawUI.WindowTitle = "ESC · Star TUI Manager (Polaris)"
 
-$HomeDir    = "D:\esc"
-$DataDir    = "D:\esc_data"
-$BackupDir  = "D:\esc_backups"
+$PathsConfigFile = Join-Path $repoRoot "esc-paths.ini"
+
+# Smart default paths:
+# 1. If esc.exe + esc_data exist right next to esc-manager.cmd (portable folder), use them.
+# 2. Otherwise if D:\ exists, default to D:\esc and D:\esc_data.
+# 3. Otherwise (another PC without D:\), default to C:\esc and C:\esc_data.
+if ((Test-Path (Join-Path $repoRoot "esc.exe")) -and (Test-Path (Join-Path $repoRoot "esc_data"))) {
+    $HomeDir   = $repoRoot
+    $DataDir   = Join-Path $repoRoot "esc_data"
+    $BackupDir = Join-Path $repoRoot "esc_backups"
+} elseif (Test-Path "D:\") {
+    $HomeDir   = "D:\esc"
+    $DataDir   = "D:\esc_data"
+    $BackupDir = "D:\esc_backups"
+} else {
+    $HomeDir   = "C:\esc"
+    $DataDir   = "C:\esc_data"
+    $BackupDir = "C:\esc_backups"
+}
+
+# Load user-configured custom paths from esc-paths.ini if present
+if (Test-Path $PathsConfigFile) {
+    foreach ($line in (Get-Content $PathsConfigFile -ErrorAction SilentlyContinue)) {
+        if ($line -match '^\s*home\s*=\s*(.+)$')   { $HomeDir   = $Matches[1].Trim() }
+        if ($line -match '^\s*data\s*=\s*(.+)$')   { $DataDir   = $Matches[1].Trim() }
+        if ($line -match '^\s*backup\s*=\s*(.+)$') { $BackupDir = $Matches[1].Trim() }
+    }
+}
+
+function Save-PathsConfig {
+    @(
+        "# ESC Star Manager custom paths",
+        "home = $HomeDir",
+        "data = $DataDir",
+        "backup = $BackupDir"
+    ) | Set-Content $PathsConfigFile -Encoding UTF8
+    # Keep run-relay.ps1 in sync with the chosen HomeDir and DataDir if it exists
+    if (Test-Path "$HomeDir\run-relay.ps1") {
+        @"
+while (`$true) {
+  cmd /c "`"$HomeDir\esc.exe`" serve --data `"$DataDir`" --listen $ProdListen --tunnel-log `"$HomeDir\tunnel.log`" >> `"$HomeDir\esc.log`" 2>&1"
+  Start-Sleep -Seconds 3
+}
+"@ | Set-Content (Join-Path $HomeDir 'run-relay.ps1') -Encoding utf8
+    }
+}
+
 $ProdListen = "127.0.0.1:7878"
 $DevListen  = "127.0.0.1:7979"
 $DevDir     = Join-Path $repoRoot "data\dev_star"
@@ -661,7 +705,7 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
     $items = @(
         @{ Key = "1"; Label = "Start / Restart Production Star ($($st.StarName) + Cloudflare Tunnel)" },
         @{ Key = "2"; Label = "Stop Production Star & Cloudflare Tunnel" },
-        @{ Key = "3"; Label = "Build Release & Deploy to Production (cargo build --release -> D:\esc)" },
+        @{ Key = "3"; Label = "Build Release & Deploy to Production (cargo build --release -> $HomeDir)" },
         @{ Key = "4"; Label = $(if ($st.DevProc) { "Stop Dev Server (port 7979)" } else { "Start Dev Server on port 7979 (serves live web/ without rebuild)" }) },
         @{ Key = "5"; Label = "Copy Public Tunnel URL to Clipboard & Open in Browser" },
         @{ Key = "6"; Label = "Open Local Star URL in Browser (http://$($st.ProdListen) or Dev 7979)" },
@@ -736,8 +780,8 @@ function Start-ProdStar {
     Set-CursorHidden $false
     Write-Host "`n  Starting / Restarting Production Star..." -ForegroundColor Cyan
     if (-not (Test-Path "$HomeDir\esc.exe")) {
-        Write-Host "  D:\esc\esc.exe not found. Running deploy\install.ps1..." -ForegroundColor Yellow
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1")
+        Write-Host "  $HomeDir\esc.exe not found. Running deploy\install.ps1..." -ForegroundColor Yellow
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1") -Home_ $HomeDir -Data $DataDir
         return "Production Star installed and started."
     }
     $tunnelAlive = Get-Process cloudflared -ErrorAction SilentlyContinue
@@ -822,7 +866,7 @@ function Build-AndDeploy {
         Pop-Location
     }
     Write-Host "`n  [2/2] Deploying to $HomeDir via deploy\install.ps1..." -ForegroundColor Cyan
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1")
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1") -Home_ $HomeDir -Data $DataDir
     Write-Host "`n  Done! Press any key to return to the manager..." -ForegroundColor Green
     [void][Console]::ReadKey($true)
     Clear-ScreenSafe
@@ -1042,6 +1086,38 @@ function Backup-StarData {
     }
 }
 
+function Export-PortableBundle {
+    New-Item -ItemType Directory -Force $BackupDir | Out-Null
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $zipPath = Join-Path $BackupDir "esc_portable_$stamp.zip"
+    $stageDir = Join-Path $BackupDir "portable_$stamp"
+    $stageData = Join-Path $stageDir "esc_data"
+    New-Item -ItemType Directory -Force $stageDir, $stageData | Out-Null
+    try {
+        $exeSrc = if (Test-Path "$HomeDir\esc.exe") { "$HomeDir\esc.exe" } else { Join-Path $ServerDir "target\release\esc.exe" }
+        if (Test-Path $exeSrc) { Copy-Item $exeSrc (Join-Path $stageDir "esc.exe") -Force }
+        Copy-Item $scriptPath (Join-Path $stageDir "esc-manager.cmd") -Force
+        foreach ($sub in @("relay.ini", "secret", "log", "blobs")) {
+            $src = Join-Path $DataDir $sub
+            if (Test-Path $src) {
+                Copy-Item $src (Join-Path $stageData $sub) -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        @"
+while (`$true) {
+  cmd /c "`"`$PSScriptRoot\esc.exe`" serve --data `"`$PSScriptRoot\esc_data`" --listen $ProdListen --tunnel-log `"`$PSScriptRoot\tunnel.log`" >> `"`$PSScriptRoot\esc.log`" 2>&1"
+  Start-Sleep -Seconds 3
+}
+"@ | Set-Content (Join-Path $stageDir "run-relay.ps1") -Encoding utf8
+        Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -Force
+        return "Portable PC bundle saved: $zipPath"
+    } catch {
+        return "Portable export failed: $($_.Exception.Message)"
+    } finally {
+        Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Draw-SettingsBox($st) {
     $cfg = $st.LogState.Settings
     Write-BoxSplitTop DarkCyan
@@ -1153,8 +1229,10 @@ function Show-SettingsMenu {
             @{ Key = "2"; Label = "Set / Clear Fixed Public URL in relay.ini (for custom Cloudflare domain)" },
             @{ Key = "3"; Label = "Rotate Cloudflare Quick Tunnel URL (restart cloudflared for a new URL)" },
             @{ Key = "4"; Label = $(if ($st.AutoStart) { "Disable Windows Boot Auto-Start (remove Task Scheduler tasks)" } else { "Enable Windows Boot Auto-Start (install Task Scheduler tasks)" }) },
-            @{ Key = "5"; Label = "Create Snapshot Backup of D:\esc_data -> D:\esc_backups\*.zip" },
-            @{ Key = "6"; Label = "Copy First Active Invite Ticket Link to Clipboard" },
+            @{ Key = "5"; Label = "Create Snapshot Backup ($DataDir -> $BackupDir\*.zip)" },
+            @{ Key = "6"; Label = "Export Portable Bundle for Another PC (esc.exe + manager + esc_data)" },
+            @{ Key = "7"; Label = "Change esc_data & Relay Folder Paths (Data: $DataDir | Bin: $HomeDir)" },
+            @{ Key = "8"; Label = "Copy First Active Invite Ticket Link to Clipboard" },
             @{ Key = "B"; Label = "Back to Main Menu" }
         )
 
@@ -1187,7 +1265,7 @@ function Show-SettingsMenu {
             Write-BoxRow @(
                 @(" [Up/Down + Enter] ", [ConsoleColor]::Cyan),
                 @("or ", [ConsoleColor]::DarkGray),
-                @("[1-6] Actions  ·  [B]ack to Main Menu", [ConsoleColor]::Gray)
+                @("[1-8] Actions  ·  [B]ack to Main Menu", [ConsoleColor]::Gray)
             )
         }
         Write-BoxBottom DarkCyan
@@ -1219,9 +1297,13 @@ function Show-SettingsMenu {
             'NumPad5'   { $act = 4 }
             'D6'        { $act = 5 }
             'NumPad6'   { $act = 5 }
-            'B'         { $act = 6 }
-            'Q'         { $act = 6 }
-            'Escape'    { $act = 6 }
+            'D7'        { $act = 6 }
+            'NumPad7'   { $act = 6 }
+            'D8'        { $act = 7 }
+            'NumPad8'   { $act = 7 }
+            'B'         { $act = 8 }
+            'Q'         { $act = 8 }
+            'Escape'    { $act = 8 }
         }
         if ($null -eq $act) { continue }
         $subSel = $act
@@ -1273,7 +1355,7 @@ function Show-SettingsMenu {
                     }
                     $subMsg = "Removed Windows boot auto-start tasks."
                 } else {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1")
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1") -Home_ $HomeDir -Data $DataDir
                     $subMsg = "Installed & started Windows boot auto-start tasks."
                 }
                 Clear-ScreenSafe
@@ -1284,6 +1366,44 @@ function Show-SettingsMenu {
                 Clear-ScreenSafe
             }
             5 {
+                $subMsg = Export-PortableBundle
+                Clear-ScreenSafe
+            }
+            6 {
+                Set-CursorHidden $false
+                Write-Host "`n   Current Data Folder (esc_data) : $DataDir" -ForegroundColor Gray
+                Write-Host "   Enter new Data Folder path (e.g. C:\esc_data, or Enter to keep): " -ForegroundColor Cyan -NoNewline
+                $newData = (Read-Host).Trim()
+                Write-Host "   Current Relay Bin Folder       : $HomeDir" -ForegroundColor Gray
+                Write-Host "   Enter new Relay Bin Folder (e.g. C:\esc, or Enter to keep): " -ForegroundColor Cyan -NoNewline
+                $newHome = (Read-Host).Trim()
+                $oldData = $DataDir
+                if ($newData) { $script:DataDir = $newData }
+                if ($newHome) { $script:HomeDir = $newHome }
+                if ($newData -or $newHome) {
+                    New-Item -ItemType Directory -Force $script:DataDir, $script:HomeDir | Out-Null
+                    if ($newData -and ($oldData -ne $script:DataDir) -and (Test-Path "$oldData\relay.ini") -and -not (Test-Path "$($script:DataDir)\relay.ini")) {
+                        Write-Host "   Copy existing data from $oldData to $($script:DataDir)? [Y/n]: " -ForegroundColor Yellow -NoNewline
+                        $ans = (Read-Host).Trim()
+                        if ($ans -eq '' -or $ans -match '^[Yy]') {
+                            foreach ($sub in @("relay.ini", "secret", "log", "blobs")) {
+                                $src = Join-Path $oldData $sub
+                                if (Test-Path $src) {
+                                    Copy-Item $src (Join-Path $script:DataDir $sub) -Recurse -Force -ErrorAction SilentlyContinue
+                                }
+                            }
+                        }
+                    }
+                    Save-PathsConfig
+                    $subMsg = "Saved paths to esc-paths.ini (Data: $($script:DataDir) | Bin: $($script:HomeDir))."
+                } else {
+                    $subMsg = "No path changes made."
+                }
+                Set-CursorHidden $true
+                Clear-ScreenSafe
+                $st = Get-StarStatus
+            }
+            7 {
                 if ($st.LogState.Invites.Count -gt 0) {
                     $inv = $st.LogState.Invites[0]
                     $base = if ($st.PublicUrl) { $st.PublicUrl } else { "http://$($st.ProdListen)" }
@@ -1294,7 +1414,7 @@ function Show-SettingsMenu {
                     $subMsg = "No active Invite Tickets found in Logbook."
                 }
             }
-            6 {
+            8 {
                 Clear-ScreenSafe
                 return "Returned from Settings & Control Tower."
             }

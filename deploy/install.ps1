@@ -2,8 +2,8 @@
 # Run from an elevated PowerShell:  powershell -ExecutionPolicy Bypass -File deploy\install.ps1
 # Undo:                             powershell -ExecutionPolicy Bypass -File deploy\uninstall.ps1
 param(
-  [string]$Home_ = 'D:\esc',
-  [string]$Data = 'D:\esc_data',
+  [string]$Home_ = $(if (Test-Path 'D:\') { 'D:\esc' } else { 'C:\esc' }),
+  [string]$Data = $(if (Test-Path 'D:\') { 'D:\esc_data' } else { 'C:\esc_data' }),
   [string]$Listen = '127.0.0.1:7878'
 )
 $ErrorActionPreference = 'Stop'
