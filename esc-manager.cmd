@@ -712,6 +712,7 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
         @{ Key = "7"; Label = "Live Logs Monitor (real-time esc.log & tunnel.log stream)" },
         @{ Key = "8"; Label = "Run Cargo Clippy & Release Unit Tests (126+ tests)" },
         @{ Key = "9"; Label = "Show All Users in Relay ($($st.UserCount) accounts: Callsign, Name, Role & Tank)" },
+        @{ Key = "J"; Label = "Join an Existing Ring (esc join wizard — connect this PC to another Star)" },
         @{ Key = "S"; Label = "Settings & Control Tower (Star Config, Quotas, Tickets, Backup & Boot)" },
         @{ Key = "R"; Label = "Force Refresh Telemetry Now" },
         @{ Key = "Q"; Label = "Quit ESC Star Manager" }
@@ -749,8 +750,8 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
         Write-BoxRow @(
             @(" [Up/Down + Enter] ", [ConsoleColor]::Cyan),
             @("or ", [ConsoleColor]::DarkGray),
-            @("[1-9] Actions  ·  [U]sers  ·  [S]ettings  ·  [R]efresh  ·  [Q]uit", [ConsoleColor]::Gray),
-            @("              [$clock]", [ConsoleColor]::DarkGray)
+            @("[1-9] Actions  ·  [J]oin Ring  ·  [U]sers  ·  [S]ettings  ·  [R]efresh  ·  [Q]uit", [ConsoleColor]::Gray),
+            @(" [$clock]", [ConsoleColor]::DarkGray)
         )
     }
 
@@ -775,6 +776,147 @@ function Play-BootIntro {
 # ──────────────────────────────────────────────────────────────────────────────
 # Commands & Actions
 # ──────────────────────────────────────────────────────────────────────────────
+
+function Join-ExistingRing {
+    Set-CursorHidden $false
+    Clear-ScreenSafe
+    Draw-AnimatedHeader -frame 0 -starName "New Star" -online $false
+    Write-BoxDivider "═" DarkCyan
+    Write-BoxRow @( ,@(" JOIN AN EXISTING RING (esc join Wizard)", [ConsoleColor]::Cyan) )
+    Write-BoxDivider "─" DarkCyan
+    Write-BoxRow @( ,@(" 1. On your existing Star (e.g. Polaris), open Control Tower -> The Ring -> Light a new Star.", [ConsoleColor]::Gray) )
+    Write-BoxRow @( ,@(" 2. Paste either the full 'esc join ...' command OR the Star URL below.", [ConsoleColor]::Gray) )
+    Write-BoxBottom DarkCyan
+
+    Write-Host "`n   Star URL or full 'esc join <url> <spark>' command (leave blank to cancel):" -ForegroundColor Cyan
+    Write-Host "   > " -ForegroundColor Yellow -NoNewline
+    $rawInput = (Read-Host).Trim()
+    if (-not $rawInput) {
+        Clear-ScreenSafe
+        return "Join Ring cancelled."
+    }
+
+    $peerUrl = ""
+    $spark   = ""
+    if ($rawInput -match '(https?://\S+)\s+([A-Za-z0-9_-]+)') {
+        $peerUrl = $Matches[1].TrimEnd('/')
+        $spark   = $Matches[2].Trim()
+        Write-Host "   Detected Star URL : $peerUrl" -ForegroundColor Green
+        Write-Host "   Detected Spark    : $spark" -ForegroundColor Green
+    } else {
+        $peerUrl = $rawInput.TrimEnd('/')
+        Write-Host "`n   Enter the one-time Spark token from Control Tower (leave blank to cancel):" -ForegroundColor Cyan
+        Write-Host "   > " -ForegroundColor Yellow -NoNewline
+        $spark = (Read-Host).Trim()
+        if (-not $spark) {
+            Clear-ScreenSafe
+            return "Join Ring cancelled."
+        }
+    }
+
+    Write-Host "`n   Target Data Folder on this PC [Enter for $DataDir]: " -ForegroundColor Cyan -NoNewline
+    $customData = (Read-Host).Trim()
+    if ($customData) {
+        $script:DataDir = $customData
+        if (-not (Test-Path $PathsConfigFile)) {
+            $driveRoot = Split-Path -Path $customData -Qualifier -ErrorAction SilentlyContinue
+            if ($driveRoot) {
+                $script:HomeDir   = Join-Path $driveRoot "\esc"
+                $script:BackupDir = Join-Path $driveRoot "\esc_backups"
+            }
+        }
+    }
+
+    if (Test-Path (Join-Path $DataDir "relay.ini")) {
+        Write-Host "`n   [!] $DataDir already holds a Star (relay.ini exists)." -ForegroundColor Yellow
+        Write-Host "   Move existing $DataDir to backup folder before joining? [y/N]: " -ForegroundColor Yellow -NoNewline
+        $ans = (Read-Host).Trim()
+        if ($ans -match '^[Yy]') {
+            [void](Stop-ProdStar)
+            $bak = "${DataDir}_old_$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Move-Item $DataDir $bak -Force
+            Write-Host "   Moved old data folder to $bak" -ForegroundColor Gray
+        } else {
+            Clear-ScreenSafe
+            return "Join Ring cancelled ($DataDir already holds a Star)."
+        }
+    }
+
+    Write-Host "`n   Optional Star Name (press Enter to let the Ring pick Vega, Sirius, etc.): " -ForegroundColor Cyan -NoNewline
+    $customName = (Read-Host).Trim()
+
+    # Locate esc.exe
+    $exeCandidates = @(
+        (Join-Path $HomeDir "esc.exe"),
+        (Join-Path $repoRoot "esc.exe"),
+        (Join-Path $ServerDir "target\release\esc.exe")
+    )
+    $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $exePath -and (Test-Path (Join-Path $ServerDir "Cargo.toml"))) {
+        Write-Host "`n   esc.exe not found yet; building release binary..." -ForegroundColor Cyan
+        Push-Location $ServerDir
+        & cargo build --release
+        Pop-Location
+        $exePath = Join-Path $ServerDir "target\release\esc.exe"
+    }
+    if (-not $exePath -or -not (Test-Path $exePath)) {
+        Write-Host "`n   [!] Could not find esc.exe. Place esc.exe next to esc-manager.cmd or in $HomeDir." -ForegroundColor Red
+        Write-Host "   Press any key to return..." -ForegroundColor Gray
+        [void][Console]::ReadKey($true)
+        Clear-ScreenSafe
+        return "Join Ring failed: esc.exe not found."
+    }
+
+    New-Item -ItemType Directory -Force $HomeDir | Out-Null
+    $homeExe = Join-Path $HomeDir "esc.exe"
+    if ($exePath -ne $homeExe) {
+        Copy-Item $exePath $homeExe -Force -ErrorAction SilentlyContinue
+        if (Test-Path $homeExe) { $exePath = $homeExe }
+    }
+
+    $joinArgs = @("join", $peerUrl, $spark, "--data", $DataDir)
+    if ($customName) { $joinArgs += @("--name", $customName) }
+
+    Write-Host "`n   Connecting to $peerUrl and joining the Ring..." -ForegroundColor Cyan
+    & $exePath @joinArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "`n   [!] 'esc join' failed (exit code $LASTEXITCODE). Check the URL and Spark." -ForegroundColor Red
+        Write-Host "   Press any key to return..." -ForegroundColor Gray
+        [void][Console]::ReadKey($true)
+        Clear-ScreenSafe
+        return "Join Ring failed."
+    }
+
+    Save-PathsConfig
+    # Ensure run-relay.ps1 and run-tunnel.ps1 exist in $HomeDir so [1] Start works on a standalone PC
+    if (-not (Test-Path "$HomeDir\run-relay.ps1")) {
+        @"
+while (`$true) {
+  cmd /c "`"$HomeDir\esc.exe`" serve --data `"$DataDir`" --listen $ProdListen --tunnel-log `"$HomeDir\tunnel.log`" >> `"$HomeDir\esc.log`" 2>&1"
+  Start-Sleep -Seconds 3
+}
+"@ | Set-Content (Join-Path $HomeDir 'run-relay.ps1') -Encoding utf8
+    }
+    $cfCmd = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
+    if (-not $cfCmd) { $cfCmd = 'C:\Program Files (x86)\cloudflared\cloudflared.exe' }
+    if (-not (Test-Path "$HomeDir\run-tunnel.ps1") -and (Test-Path $cfCmd)) {
+        @"
+while (`$true) {
+  Remove-Item '$HomeDir\tunnel.log' -ErrorAction SilentlyContinue
+  & '$cfCmd' tunnel --no-autoupdate --url 'http://$ProdListen' --logfile '$HomeDir\tunnel.log' *> `$null
+  Start-Sleep -Seconds 5
+}
+"@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
+    }
+
+    Write-Host "`n   [OK] Successfully joined the Ring! Start this Star now? [Y/n]: " -ForegroundColor Green -NoNewline
+    $startNow = (Read-Host).Trim()
+    if ($startNow -eq '' -or $startNow -match '^[Yy]') {
+        return (Start-ProdStar)
+    }
+    Clear-ScreenSafe
+    return "Joined the Ring in $DataDir. Press [1] to start serving."
+}
 
 function Start-ProdStar {
     Set-CursorHidden $false
@@ -1451,7 +1593,7 @@ if ($cliArgs -and ($cliArgs[0] -match 'status|--status|-s')) {
 # ──────────────────────────────────────────────────────────────────────────────
 
 $selected = 0
-$menuCount = 12
+$menuCount = 13
 $flash = ""
 $frame = 0
 $st = Get-StarStatus
@@ -1502,12 +1644,13 @@ try {
             'D9'        { $action = 8 }
             'NumPad9'   { $action = 8 }
             'U'         { $action = 8 }
-            'S'         { $action = 9 }
-            'D0'        { $action = 9 }
-            'NumPad0'   { $action = 9 }
-            'R'         { $action = 10 }
-            'Q'         { $action = 11 }
-            'Escape'    { $action = 11 }
+            'J'         { $action = 9 }
+            'S'         { $action = 10 }
+            'D0'        { $action = 10 }
+            'NumPad0'   { $action = 10 }
+            'R'         { $action = 11 }
+            'Q'         { $action = 12 }
+            'Escape'    { $action = 12 }
         }
 
         if ($null -eq $action) { continue }
@@ -1541,12 +1684,13 @@ try {
             6 { Show-Logs; $st = Get-StarStatus }
             7 { $flash = Run-Checks; $st = Get-StarStatus }
             8 { $flash = Show-Users; $st = Get-StarStatus }
-            9 { $flash = Show-SettingsMenu; $st = Get-StarStatus }
-            10 {
+            9 { $flash = Join-ExistingRing; $st = Get-StarStatus }
+            10 { $flash = Show-SettingsMenu; $st = Get-StarStatus }
+            11 {
                 $st = Get-StarStatus
                 $flash = "Telemetry refreshed at $(Get-Date -Format 'HH:mm:ss')."
             }
-            11 {
+            12 {
                 Set-CursorHidden $false
                 Clear-ScreenSafe
                 Write-Host "ESC Star Manager closed." -ForegroundColor Cyan
