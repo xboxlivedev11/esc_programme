@@ -3,7 +3,8 @@
 //!
 //! Cache strategy: `index.html` is never cached; it references `/a/<file>?v=<content hash>`, and
 //! those exact URLs are cached forever (immutable). A new build changes the hash, so browsers
-//! always get the new app with zero stale-cache risk.
+//! always get the new app with zero stale-cache risk. Module imports (`from './i18n.js'`) get
+//! the same `?v=` treatment, so the whole module graph is cached the same way.
 
 use std::collections::HashMap;
 use std::fs;
@@ -16,6 +17,8 @@ use crate::http::{Conn, Request};
 const FILES: &[(&str, &[u8])] = &[
     ("index.html", include_bytes!("../../web/index.html")),
     ("app.js", include_bytes!("../../web/app.js")),
+    ("i18n.js", include_bytes!("../../web/i18n.js")),
+    ("theme.js", include_bytes!("../../web/theme.js")),
     ("app.css", include_bytes!("../../web/app.css")),
     ("sw.js", include_bytes!("../../web/sw.js")),
     ("manifest.webmanifest", include_bytes!("../../web/manifest.webmanifest")),
@@ -52,10 +55,27 @@ fn ctype(name: &str) -> &'static str {
 
 impl Lobby {
     pub fn new(dir: Option<PathBuf>) -> Lobby {
-        let mut assets = HashMap::new();
-        for (name, body) in FILES {
-            let tag = hex(&sha256(body))[..12].to_string();
-            assets.insert(*name, Asset { body: body.to_vec(), tag });
+        let tag_of = |body: &[u8]| hex(&sha256(body))[..12].to_string();
+        let mut assets: HashMap<&'static str, Asset> =
+            FILES.iter().map(|(name, body)| (*name, Asset { body: body.to_vec(), tag: tag_of(body) })).collect();
+        // Point `'./x.js'` imports at the versioned URL. One level deep: an imported module must
+        // import nothing itself (checked by a test), so its tag is already final here.
+        let modules: Vec<(&str, String)> =
+            assets.iter().filter(|(n, _)| n.ends_with(".js")).map(|(n, a)| (*n, a.tag.clone())).collect();
+        for (name, asset) in assets.iter_mut().filter(|(n, _)| n.ends_with(".js")) {
+            let mut text = String::from_utf8_lossy(&asset.body).into_owned();
+            let mut changed = false;
+            for (dep, tag) in modules.iter().filter(|(d, _)| d != name) {
+                let plain = format!("'./{dep}'");
+                if text.contains(&plain) {
+                    text = text.replace(&plain, &format!("'./{dep}?v={tag}'"));
+                    changed = true;
+                }
+            }
+            if changed {
+                asset.body = text.into_bytes();
+                asset.tag = tag_of(&asset.body);
+            }
         }
         let mut index = String::from_utf8_lossy(&assets["index.html"].body).into_owned();
         for (name, a) in &assets {
@@ -113,7 +133,31 @@ fn headers<'a>(name: &str, cache: &'a str) -> Vec<(&'a str, &'a str)> {
         h.push(("Content-Security-Policy", CSP));
         h.push(("Referrer-Policy", "no-referrer"));
         h.push(("Cross-Origin-Opener-Policy", "same-origin"));
-        h.push(("Permissions-Policy", "camera=(), microphone=(), geolocation=(), interest-cohort=()"));
+        h.push(("Permissions-Policy", "camera=(), microphone=(self), geolocation=(), interest-cohort=()"));
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_imports_are_versioned_and_one_level_deep() {
+        let lobby = Lobby::new(None);
+        let app = String::from_utf8_lossy(&lobby.assets["app.js"].body).into_owned();
+        let i18n = &lobby.assets["i18n.js"];
+        assert!(app.contains(&format!("'./i18n.js?v={}'", i18n.tag)), "app.js must import the versioned dictionary");
+        for (name, a) in &lobby.assets {
+            let text = String::from_utf8_lossy(&a.body);
+            let imported = lobby.assets.values().any(|o| String::from_utf8_lossy(&o.body).contains(&format!("'./{name}?v=")));
+            if imported {
+                assert!(!text.contains("from './"), "{name} is imported, so it must not import anything itself");
+            }
+        }
+        let index = String::from_utf8_lossy(&lobby.index);
+        for n in ["app.js", "app.css", "theme.js"] {
+            assert!(index.contains(&format!("/a/{n}?v={}\"", lobby.assets[n].tag)), "index must reference {n} by version");
+        }
+    }
 }

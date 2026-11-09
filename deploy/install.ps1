@@ -18,9 +18,14 @@ New-Item -ItemType Directory -Force $Home_, $Data | Out-Null
 # Windows PowerShell 5.1 turns any stderr of a native command into a fatal error under 'Stop':
 # from here on native calls are checked by exit code instead.
 $ErrorActionPreference = 'Continue'
-# Stop running copies so the binary can be replaced.
-foreach ($t in 'ESC Relay', 'ESC Tunnel') { cmd /c "schtasks /end /tn `"$t`" >nul 2>&1" }
-Get-Process esc, cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Home_*" -or $_.Path -eq $cloudflared } | Stop-Process -Force
+# Stop running relay so esc.exe can be replaced, but keep cloudflared alive if it is already running
+# so the public *.trycloudflare.com quick-tunnel URL does not change on a relay update!
+$tunnelRunning = Get-Process cloudflared -ErrorAction SilentlyContinue
+cmd /c "schtasks /end /tn `"ESC Relay`" >nul 2>&1"
+Get-Process esc -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Home_*" } | Stop-Process -Force
+if (-not $tunnelRunning) {
+  cmd /c "schtasks /end /tn `"ESC Tunnel`" >nul 2>&1"
+}
 Start-Sleep -Milliseconds 500
 Copy-Item $exe (Join-Path $Home_ 'esc.exe') -Force
 
@@ -45,9 +50,11 @@ foreach ($pair in @(@('ESC Relay', 'run-relay.ps1'), @('ESC Tunnel', 'run-tunnel
   $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Home_\$($pair[1])`""
   schtasks /create /tn $pair[0] /tr $cmd /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Could not create the '$($pair[0])' task (run this from an elevated PowerShell)." }
-  schtasks /run /tn $pair[0] | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Could not start the '$($pair[0])' task." }
+  if ($pair[0] -eq 'ESC Relay' -or -not $tunnelRunning) {
+    schtasks /run /tn $pair[0] | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not start the '$($pair[0])' task." }
+  }
 }
-Write-Host "Installed. Waiting for the tunnel..."
-Start-Sleep -Seconds 8
+Write-Host "Installed. Waiting for the relay..."
+if (-not $tunnelRunning) { Start-Sleep -Seconds 8 } else { Start-Sleep -Seconds 2 }
 & (Join-Path $Home_ 'status.ps1') -Home_ $Home_

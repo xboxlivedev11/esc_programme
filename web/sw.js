@@ -1,4 +1,5 @@
-// ESC service worker: the app shell opens instantly and survives a flaky network.
+// ESC service worker: the app shell opens instantly and survives a flaky network, and a click on
+// a notification brings ESC to the front on the right conversation.
 // It never caches anyone's files or messages.
 const CACHE = 'esc-shell';
 
@@ -38,4 +39,19 @@ self.addEventListener('fetch', (e) => {
       ),
     );
   }
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const go = e.notification.data?.go || '';
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      const open = list.find((c) => new URL(c.url).origin === location.origin);
+      if (open) {
+        open.postMessage({ go });
+        return open.focus();
+      }
+      return self.clients.openWindow(`/#${go}`);
+    }),
+  );
 });

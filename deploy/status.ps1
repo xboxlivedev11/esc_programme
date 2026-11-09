@@ -11,12 +11,18 @@ Write-Host ("Relay   : " + $(if ($relay) { "running (pid $($relay.Id -join ','))
 Write-Host ("Tunnel  : " + $(if ($tunnel) { "running (pid $($tunnel.Id -join ','))" } else { 'NOT running' }))
 Write-Host ("Public  : " + $(if ($url) { $url } else { 'no URL yet (see tunnel.log)' }))
 if (Test-Path "$Home_\esc.log") {
-  $t = Select-String -Path "$Home_\esc.log" -Pattern '#ticket=([A-Z0-9]+)' | Select-Object -Last 1
-  $admin = Select-String -Path "$Home_\esc.log" -Pattern 'No admin yet' | Select-Object -Last 1
-  if ($t -and $admin -and $admin.LineNumber -ge ($t.LineNumber - 2)) {
-    $code = $t.Matches[0].Groups[1].Value
+  $lines = @(Get-Content "$Home_\esc.log" -ErrorAction SilentlyContinue)
+  $lastBoot = 0
+  for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+    if ($lines[$i] -match '^ESC .* Star ') { $lastBoot = $i; break }
+  }
+  $ticket = $null
+  foreach ($l in $lines[$lastBoot..($lines.Count - 1)]) {
+    if ($l -match '#ticket=([A-Z0-9]+)') { $ticket = $Matches[1] }
+  }
+  if ($ticket) {
     Write-Host ""
     Write-Host "No admin yet. Create YOUR admin account (one use):"
-    Write-Host ("  " + $(if ($url) { "$url/#ticket=$code" } else { "http://127.0.0.1:7878/#ticket=$code" }))
+    Write-Host ("  " + $(if ($url) { "$url/#ticket=$ticket" } else { "http://127.0.0.1:7878/#ticket=$ticket" }))
   }
 }

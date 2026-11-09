@@ -546,7 +546,8 @@ impl Bridge {
             .ku("ceil", st.settings.ceiling(a))
             .ku("u", a.usage)
             .ku("pin", a.pinned)
-            .ku("fx", st.settings.flex_pct);
+            .ku("fx", st.settings.flex_pct)
+            .kos("pic", pic_tag(a.pic).as_deref());
         js.key("cl");
         match a.cleanup_at {
             Some(t) => js.uint(t),
@@ -583,10 +584,13 @@ impl Bridge {
             let by = me.map(|m| m.by).unwrap_or(c.by);
             js.ks("me", "i").ks("by", &by.to_string());
             js.ks("byn", st.accounts.get(&by).map_or("", |a| a.name.as_str()));
+            if let Some(p) = st.accounts.get(&by).and_then(|a| pic_tag(a.pic)) {
+                js.ks("byp", &p);
+            }
             js.ku("cnt", c.joined_ids().count() as u64).end_obj();
             return;
         }
-        js.ks("me", "j").key("m").arr();
+        js.ks("me", "j").kos("pic", pic_tag(c.pic).as_deref()).key("m").arr();
         for m in &c.members {
             let shown = match m.st {
                 MState::Joined => "j",
@@ -599,15 +603,22 @@ impl Bridge {
                 && let Some(acc) = st.accounts.get(&m.a)
             {
                 js.ks("n", &acc.name);
+                if let Some(p) = pic_tag(acc.pic) {
+                    js.ks("p", &p);
+                }
             }
             js.end_obj();
         }
         js.end_arr();
         let since = me.map_or(0, |m| m.since);
-        if let Some((r, text, n)) = &c.last
+        if let Some((r, text, n, voice)) = &c.last
             && r.ts >= since
         {
-            js.key("l").obj().ku("t", r.ts).ks("f", &r.from.to_string()).ks("x", text).ku("k", *n as u64).end_obj();
+            js.key("l").obj().ku("t", r.ts).ks("f", &r.from.to_string()).ks("x", text).ku("k", *n as u64);
+            if *voice {
+                js.kb("v", true);
+            }
+            js.end_obj();
         }
         let read = st.accounts.get(&viewer).and_then(|a| a.reads.get(&c.id)).copied().unwrap_or(0).max(since);
         let start = c.msgs.partition_point(|m| m.ts <= read);
@@ -617,7 +628,11 @@ impl Bridge {
 
     fn req_in_json(st: &State, r: &crate::model::Req, js: &mut Js) {
         js.obj().ks("r", &id64(r.id)).ks("f", &r.from.to_string()).ks("x", &r.note).ku("t", r.ts);
-        js.ks("n", st.accounts.get(&r.from).map_or("", |a| a.name.as_str())).end_obj();
+        js.ks("n", st.accounts.get(&r.from).map_or("", |a| a.name.as_str()));
+        if let Some(p) = st.accounts.get(&r.from).and_then(|a| pic_tag(a.pic)) {
+            js.ks("p", &p);
+        }
+        js.end_obj();
     }
 
     fn req_out_json(r: &crate::model::Req, js: &mut Js) {
@@ -655,6 +670,9 @@ impl Bridge {
                     .ks("s", state);
                 if meta.w > 0 {
                     js.ku("w", meta.w as u64).ku("h", meta.h as u64);
+                }
+                if meta.d > 0 {
+                    js.ku("d", meta.d as u64);
                 }
                 js.end_obj();
             }
@@ -772,29 +790,148 @@ impl Bridge {
         }
         Self::push_me(&mut tx, a);
         if j.s("n").is_some() {
-            // Everyone who shares a conversation sees the new name.
-            let mut peers: Vec<Aid> = Vec::new();
-            let mut convs: Vec<u64> = Vec::new();
-            for c in tx.st.accounts[&a].convs.iter().filter_map(|c| tx.st.convs.get(c)) {
-                if c.joined(a) {
-                    convs.push(c.id);
-                    peers.extend(c.joined_ids());
-                }
-            }
-            peers.sort();
-            peers.dedup();
-            for p in peers {
-                for &c in &convs {
-                    if tx.st.convs.get(&c).is_some_and(|cv| cv.joined(p))
-                        && let Some(m) = Self::conv_push(&tx.st, c, p)
-                    {
-                        tx.push(p, &m);
-                    }
-                }
-            }
+            Self::push_profile(&mut tx, a);
         }
         tx.commit()?;
         Ok("{}".into())
+    }
+
+    /// Tell everyone who can see `a`'s profile that it changed: each member of a shared conversation
+    /// gets a fresh conversation view, people `a` invited to a crew get theirs, and pending knocks
+    /// are re-pushed to the people knocked.
+    fn push_profile(tx: &mut Tx, a: Aid) {
+        let mut views: Vec<(u64, Aid)> = Vec::new();
+        let mut knocks: Vec<(Aid, String)> = Vec::new();
+        if let Some(acc) = tx.st.accounts.get(&a) {
+            for c in acc.convs.iter().filter_map(|c| tx.st.convs.get(c)).filter(|c| c.joined(a)) {
+                views.extend(c.joined_ids().map(|p| (c.id, p)));
+                views.extend(c.members.iter().filter(|m| m.st == MState::Invited && !m.void && m.by == a).map(|m| (c.id, m.a)));
+            }
+            for r in acc.req_out.iter().filter_map(|r| tx.st.reqs.get(r)).filter(|r| !r.void) {
+                let mut js = Js::new();
+                js.obj().ks("p", "rin").key("r");
+                Self::req_in_json(&tx.st, r, &mut js);
+                js.end_obj();
+                knocks.push((r.to, js.finish()));
+            }
+        }
+        views.sort_unstable();
+        views.dedup();
+        for (c, p) in views {
+            if let Some(m) = Self::conv_push(&tx.st, c, p) {
+                tx.push(p, &m);
+            }
+        }
+        for (to, m) in knocks {
+            tx.push(to, &m);
+        }
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // Pictures: profile pictures and crew pictures (one blob each, 256 KB at most)
+    // --------------------------------------------------------------------------------------------
+
+    /// The crew `c` if `me` may change its picture; Err explains why not.
+    fn crew_editor(st: &State, c: &str, me: Aid) -> R<u64> {
+        let c = parse_id64(c).ok_or_else(|| bad("bad conversation id"))?;
+        let conv = st.convs.get(&c).ok_or_else(|| bad("unknown conversation"))?;
+        if !conv.group {
+            return Err(bad("Only crews have pictures."));
+        }
+        match conv.member(me) {
+            Some(m) if m.st == MState::Joined && m.role != Role::Member => Ok(c),
+            _ => Err(forbidden("Only the owner or an admin can change the crew picture.")),
+        }
+    }
+
+    /// Set the caller's profile picture (`conv` None) or a crew's picture. `bytes` must be a PNG, JPEG or WebP.
+    pub fn set_pic(&self, me: Aid, conv: Option<&str>, bytes: &[u8]) -> R<String> {
+        if bytes.len() > MAX_PIC {
+            return Err(Fail(413, "Pictures can be at most 256 KB.".into()));
+        }
+        let is_image = matches!(
+            bytes,
+            [0x89, b'P', b'N', b'G', ..] | [0xFF, 0xD8, 0xFF, ..] | [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..]
+        );
+        if !is_image {
+            return Err(bad("Use a PNG, JPEG or WebP picture."));
+        }
+        if let Some(c) = conv {
+            Self::crew_editor(&lock(&self.st), c, me)?; // refuse before storing anything
+        }
+        let h = sha256(bytes);
+        self.store.import(&h, bytes.len() as u64, &mut &bytes[..]).map_err(ioerr)?;
+        self.write_pic(me, conv, Some((h, bytes.len() as u64)))?;
+        Ok(format!("{{\"pic\":\"{}\"}}", &hex(&h)[..12]))
+    }
+
+    /// Remove the caller's profile picture or a crew's picture.
+    pub fn clear_pic(&self, me: Aid, conv: Option<&str>) -> R<String> {
+        self.write_pic(me, conv, None)?;
+        Ok("{\"pic\":null}".into())
+    }
+
+    fn write_pic(&self, me: Aid, conv: Option<&str>, pic: Option<(Hash, u64)>) -> R<()> {
+        let mut tx = self.begin();
+        let mut e = Js::new();
+        match conv {
+            None => {
+                let acc = tx.st.accounts.get(&me).ok_or_else(|| Fail(401, "no account".into()))?;
+                if acc.pic.map(|p| p.0) != pic.map(|p| p.0) {
+                    e.obj().ks("a", &me.to_string());
+                    Self::write_pic_fields(&mut e, pic);
+                    tx.emit(kind::ACCOUNT_SET, e)?;
+                }
+                Self::push_me(&mut tx, me);
+                Self::push_profile(&mut tx, me);
+            }
+            Some(c) => {
+                let c = Self::crew_editor(&tx.st, c, me)?;
+                if tx.st.convs[&c].pic.map(|p| p.0) != pic.map(|p| p.0) {
+                    e.obj().ks("c", &id64(c));
+                    Self::write_pic_fields(&mut e, pic);
+                    tx.emit(kind::CONV_SET, e)?;
+                }
+                Self::push_members(&mut tx, c);
+            }
+        }
+        tx.commit()
+    }
+
+    fn write_pic_fields(e: &mut Js, pic: Option<(Hash, u64)>) {
+        match pic {
+            Some((h, z)) => e.ks("pic", &hex(&h)).ku("pz", z),
+            None => e.key("pic").null(),
+        };
+        e.end_obj();
+    }
+
+    /// The picture `viewer` may see: `what` is "u" (an account, by callsign) or "c" (a crew, by conversation id).
+    /// A profile picture is visible to its owner, to people sharing a conversation, to someone it knocked,
+    /// and to someone it invited to a crew. A crew picture is visible to joined members.
+    pub fn pic_for(&self, viewer: Aid, what: &str, id: &str) -> Option<(Hash, u64)> {
+        let st = lock(&self.st);
+        match what {
+            "u" => {
+                let t = Aid::parse(id)?;
+                let pic = st.accounts.get(&t)?.pic?;
+                let v = st.accounts.get(&viewer)?;
+                let visible = viewer == t
+                    || Self::shares_conversation(&st, viewer, t)
+                    || v.req_in.iter().filter_map(|r| st.reqs.get(r)).any(|r| r.from == t && !r.void)
+                    || v
+                        .convs
+                        .iter()
+                        .filter_map(|c| st.convs.get(c))
+                        .any(|c| c.member(viewer).is_some_and(|m| m.st == MState::Invited && !m.void && m.by == t));
+                visible.then_some(pic)
+            }
+            "c" => {
+                let conv = st.convs.get(&parse_id64(id)?)?;
+                if conv.joined(viewer) { conv.pic } else { None }
+            }
+            _ => None,
+        }
     }
 
     pub fn block(&self, a: Aid, target: &str, on: bool) -> R<String> {
@@ -1498,6 +1635,10 @@ impl Bridge {
                 .kb("live", f.meta.blobs().all(|b| st.blobs.contains_key(&b)));
             if f.meta.w > 0 {
                 js.ku("w", f.meta.w as u64).ku("h", f.meta.h as u64);
+            }
+            if f.meta.d > 0 {
+                // "d" is taken here (drive / sent / recv), so the duration is "du" in this list.
+                js.ku("du", f.meta.d as u64);
             }
             js.key("c").arr();
             for c in &f.convs {
@@ -2236,6 +2377,14 @@ impl Bridge {
     }
 }
 
+/// Largest accepted picture.
+pub const MAX_PIC: usize = 256 * 1024;
+
+/// The first 12 hex digits of a picture's hash: what the web app puts in `?v=` and compares to see changes.
+fn pic_tag(p: Option<(Hash, u64)>) -> Option<String> {
+    p.map(|(h, _)| hex(&h)[..12].to_string())
+}
+
 fn mask_email(e: &str) -> String {
     match e.split_once('@') {
         Some((u, d)) => format!("{}***@{d}", u.chars().next().unwrap_or('*')),
@@ -2329,6 +2478,147 @@ mod tests {
         assert_eq!(parse(&bridge.history(a, &g, None, 50).unwrap()).unwrap().a("m").len(), 1);
         let hello = bridge.hello(b).unwrap();
         assert_eq!(parse(&hello).unwrap().a("convs").len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn image(magic: &[u8], fill: u8, len: usize) -> Vec<u8> {
+        let mut v = magic.to_vec();
+        v.resize(len, fill);
+        v
+    }
+
+    fn tag(bytes: &[u8]) -> String {
+        hex(&sha256(bytes))[..12].to_string()
+    }
+
+    #[test]
+    fn pictures_profile_and_crew() {
+        let dir = tmp("pics");
+        let o = Bridge::open(&dir, None).unwrap();
+        let bridge = &o.bridge;
+        let a = signup(bridge, &o.admin_invite.clone().unwrap());
+        open_signup(bridge);
+        let (b, c, d) = (signup(bridge, ""), signup(bridge, ""), signup(bridge, ""));
+        let png = image(&[0x89, b'P', b'N', b'G', 13, 10, 26, 10], 1, 300);
+        let jpeg = image(&[0xFF, 0xD8, 0xFF, 0xE0], 2, 300);
+        let webp = image(b"RIFF\x10\0\0\0WEBPVP8 ", 3, 300);
+
+        // Validation: magic bytes and size.
+        let err = |r: R<String>| r.unwrap_err();
+        let e = err(bridge.set_pic(a, None, b"GIF89a not allowed"));
+        assert_eq!((e.0, e.1.as_str()), (400, "Use a PNG, JPEG or WebP picture."));
+        assert_eq!(err(bridge.set_pic(a, None, b"RIFF....WAVEfmt ")).0, 400, "RIFF but not WebP");
+        assert_eq!(err(bridge.set_pic(a, None, b"")).0, 400);
+        let e = err(bridge.set_pic(a, None, &image(&[0x89, b'P', b'N', b'G'], 0, MAX_PIC + 1)));
+        assert_eq!((e.0, e.1.as_str()), (413, "Pictures can be at most 256 KB."));
+        assert!(bridge.set_pic(a, None, &image(&[0x89, b'P', b'N', b'G'], 0, MAX_PIC)).is_ok(), "exactly 256 KiB fits");
+
+        // Happy path.
+        let r = bridge.set_pic(a, None, &png).unwrap();
+        assert_eq!(parse(&r).unwrap().s("pic"), Some(tag(&png).as_str()));
+        assert!(bridge.store.has(&sha256(&png)));
+        let me = parse(&bridge.hello(a).unwrap()).unwrap();
+        assert_eq!(me.get("me").and_then(|m| m.s("pic")), Some(tag(&png).as_str()));
+        assert!(parse(&bridge.hello(b).unwrap()).unwrap().get("me").unwrap().get("pic").unwrap().is_null());
+        assert_eq!(bridge.pic_for(a, "u", &a.to_string()).map(|p| p.1), Some(png.len() as u64));
+
+        // Who may see it: strangers no; the person knocked yes (but not the other way round).
+        bridge.set_pic(b, None, &jpeg).unwrap();
+        assert_eq!(bridge.pic_for(b, "u", &a.to_string()), None, "a stranger sees nothing");
+        assert_eq!(bridge.pic_for(c, "u", &a.to_string()), None);
+        assert_eq!(bridge.pic_for(a, "u", "ZZZZ"), None);
+        assert_eq!(bridge.pic_for(a, "x", &a.to_string()), None);
+        bridge.req_send(a, &b.to_string(), "hi").unwrap();
+        assert_eq!(bridge.pic_for(b, "u", &a.to_string()).map(|p| p.0), Some(sha256(&png)), "b was knocked by a");
+        assert_eq!(bridge.pic_for(a, "u", &b.to_string()), None, "a has not been knocked by b");
+        let hello_b = parse(&bridge.hello(b).unwrap()).unwrap();
+        assert_eq!(hello_b.a("rin")[0].s("p"), Some(tag(&png).as_str()), "the knock carries the picture");
+        let rin = bridge.st.lock().unwrap().accounts[&b].req_in.clone();
+        let conv = parse(&bridge.req_answer(b, &id64(rin[0]), "accept").unwrap()).unwrap().s("c").unwrap().to_string();
+        assert_eq!(bridge.pic_for(a, "u", &b.to_string()).map(|p| p.0), Some(sha256(&jpeg)), "they share a conversation now");
+        let v = parse(&bridge.hello(b).unwrap()).unwrap();
+        let direct = &v.a("convs")[0];
+        assert!(direct.get("pic").unwrap().is_null(), "a direct chat has no picture of its own");
+        let mem = |j: &Json, who: Aid| j.a("m").iter().find(|m| m.s("a") == Some(who.to_string().as_str())).cloned().unwrap();
+        assert_eq!(mem(direct, a).s("p"), Some(tag(&png).as_str()));
+        assert_eq!(mem(direct, b).s("p"), Some(tag(&jpeg).as_str()));
+        assert_eq!(err(bridge.set_pic(a, Some(&conv), &png)).0, 400, "direct chats have no picture");
+        assert_eq!(bridge.pic_for(a, "c", &conv), None);
+
+        // Crew: owner a, member b (joined), c invited, d outside.
+        let g = bridge.group_new(a, "crew", &[Json::Str(b.to_string()), Json::Str(c.to_string())]).unwrap();
+        let g = parse(&g).unwrap().s("c").unwrap().to_string();
+        bridge.group_answer(b, &g, true).unwrap();
+        assert_eq!(bridge.pic_for(c, "u", &a.to_string()).map(|p| p.0), Some(sha256(&png)), "c was invited by a");
+        let vc = parse(&bridge.hello(c).unwrap()).unwrap();
+        let invited = vc.a("convs").iter().find(|x| x.s("c") == Some(g.as_str())).unwrap().clone();
+        assert_eq!((invited.s("me"), invited.s("byp")), (Some("i"), Some(tag(&png).as_str())));
+        assert!(invited.get("pic").is_none(), "invited people do not get the crew picture");
+
+        let e = err(bridge.set_pic(b, Some(&g), &jpeg));
+        assert_eq!((e.0, e.1.as_str()), (403, "Only the owner or an admin can change the crew picture."));
+        assert_eq!(err(bridge.set_pic(c, Some(&g), &jpeg)).0, 403, "invited is not joined");
+        assert_eq!(err(bridge.set_pic(d, Some(&g), &jpeg)).0, 403, "outsiders are refused the same way");
+        assert_eq!(err(bridge.set_pic(a, Some("nonsense"), &jpeg)).0, 400);
+        bridge.set_pic(a, Some(&g), &webp).unwrap();
+        let gid = parse_id64(&g).unwrap();
+        assert_eq!(bridge.pic_for(b, "c", &g).map(|p| p.0), Some(sha256(&webp)));
+        assert_eq!(bridge.pic_for(a, "c", &g).map(|p| p.0), Some(sha256(&webp)));
+        assert_eq!(bridge.pic_for(c, "c", &g), None, "invited");
+        assert_eq!(bridge.pic_for(d, "c", &g), None, "outside");
+        assert_eq!(bridge.pic_for(a, "c", "bad"), None);
+        let vb = parse(&bridge.hello(b).unwrap()).unwrap();
+        let crew = vb.a("convs").iter().find(|x| x.s("c") == Some(g.as_str())).unwrap().clone();
+        assert_eq!(crew.s("pic"), Some(tag(&webp).as_str()));
+        assert_eq!(mem(&crew, a).s("p"), Some(tag(&png).as_str()));
+
+        // An admin may change it too; the replaced picture's blob is deleted.
+        bridge.group_set(a, &g, &parse(&format!(r#"{{"a":"{b}","admin":true}}"#)).unwrap()).unwrap();
+        bridge.set_pic(b, Some(&g), &jpeg).unwrap();
+        assert!(!bridge.store.has(&sha256(&webp)), "the old crew picture is gone");
+        assert_eq!(bridge.st.lock().unwrap().convs[&gid].pic.map(|p| p.0), Some(sha256(&jpeg)));
+        // The same picture again changes nothing.
+        let log_end = bridge.have_now()[0].1;
+        bridge.set_pic(b, Some(&g), &jpeg).unwrap();
+        assert_eq!(bridge.have_now()[0].1, log_end, "no event for an unchanged picture");
+
+        // Clearing.
+        bridge.clear_pic(b, Some(&g)).unwrap();
+        assert_eq!(bridge.pic_for(a, "c", &g), None);
+        assert!(bridge.store.has(&sha256(&jpeg)), "b's profile picture still uses it");
+        assert_eq!(err(bridge.clear_pic(c, Some(&g))).0, 403);
+        bridge.clear_pic(a, None).unwrap();
+        assert_eq!(bridge.pic_for(a, "u", &a.to_string()), None);
+        assert!(!bridge.store.has(&sha256(&png)));
+        bridge.clear_pic(a, None).unwrap(); // clearing nothing is fine
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn voice_message_durations_reach_both_views() {
+        let dir = tmp("dur");
+        let o = Bridge::open(&dir, None).unwrap();
+        let bridge = &o.bridge;
+        let a = signup(bridge, &o.admin_invite.clone().unwrap());
+        open_signup(bridge);
+        let b = signup(bridge, "");
+        bridge.req_send(a, &b.to_string(), "").unwrap();
+        let rin = bridge.st.lock().unwrap().accounts[&b].req_in.clone();
+        let conv = parse(&bridge.req_answer(b, &id64(rin[0]), "accept").unwrap()).unwrap().s("c").unwrap().to_string();
+        let voice = vec![5u8; 2000];
+        let up = bridge.upload_begin(a, voice.len() as u64).unwrap();
+        let up = parse(&up).unwrap().s("u").unwrap().to_string();
+        let done = bridge.upload_put(a, &up, 0, voice.len() as u64, &mut &voice[..]).unwrap();
+        let blob = parse(&done).unwrap().s("b").unwrap().to_string();
+        let att = parse(&format!(r#"{{"b":"{blob}","n":"voice.webm","m":"audio/webm","z":2000,"d":12500}}"#)).unwrap();
+        bridge.send(a, &conv, "", &[att], None).unwrap();
+        for who in [a, b] {
+            let h = parse(&bridge.history(who, &conv, None, 10).unwrap()).unwrap();
+            assert_eq!(h.a("m")[0].a("a")[0].u("d"), Some(12500));
+        }
+        let files = parse(&bridge.files(a).unwrap()).unwrap();
+        assert_eq!(files.a("f")[0].u("du"), Some(12500));
+        assert_eq!(files.a("f")[0].s("d"), Some("sent"), "\"d\" in the file list stays the direction");
         let _ = fs::remove_dir_all(&dir);
     }
 

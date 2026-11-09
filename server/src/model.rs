@@ -244,6 +244,8 @@ pub struct FileMeta {
     pub p: Option<(Hash, u64)>,
     pub w: u32,
     pub h: u32,
+    /// Duration in ms (voice messages, audio, video); 0 = unknown.
+    pub d: u32,
 }
 
 fn hash_of(s: Option<&str>) -> Option<Hash> {
@@ -260,7 +262,7 @@ impl FileMeta {
         [Some(self.b), self.t.map(|x| x.0), self.p.map(|x| x.0)].into_iter().flatten()
     }
 
-    /// `{"b":hex,"n":name,"m":mime,"z":n,"t":hex,"tz":n,"p":hex,"pz":n,"w":n,"h":n}`
+    /// `{"b":hex,"n":name,"m":mime,"z":n,"t":hex,"tz":n,"p":hex,"pz":n,"w":n,"h":n,"d":ms}`
     pub fn from_json(j: &Json) -> Option<FileMeta> {
         let b = hash_of(j.s("b"))?;
         let name: String = j.s("n").unwrap_or("file").chars().filter(|c| !c.is_control()).take(200).collect();
@@ -276,6 +278,7 @@ impl FileMeta {
             p,
             w: j.u("w").unwrap_or(0).min(1 << 20) as u32,
             h: j.u("h").unwrap_or(0).min(1 << 20) as u32,
+            d: j.u("d").unwrap_or(0).min(u32::MAX as u64) as u32,
         })
     }
 
@@ -289,6 +292,9 @@ impl FileMeta {
         }
         if self.w > 0 {
             js.ku("w", self.w as u64).ku("h", self.h as u64);
+        }
+        if self.d > 0 {
+            js.ku("d", self.d as u64);
         }
         js.end_obj();
     }
@@ -359,6 +365,8 @@ pub struct Account {
     pub req_times: Vec<u64>,
     pub reads: HashMap<u64, u64>,
     pub invites_made: u64,
+    /// Profile picture: (blob, size). Holds one ref on the blob; never counts toward usage.
+    pub pic: Option<(Hash, u64)>,
 }
 
 impl Account {
@@ -422,8 +430,10 @@ pub struct Conv {
     pub by: Aid,
     pub members: Vec<Member>,
     pub msgs: Vec<MsgRef>,
-    /// Last message: (ref, text snippet, attachment count).
-    pub last: Option<(MsgRef, String, u32)>,
+    /// Last message: (ref, text snippet, attachment count, is a voice message).
+    pub last: Option<(MsgRef, String, u32, bool)>,
+    /// Crew picture: (blob, size). Holds one ref on the blob.
+    pub pic: Option<(Hash, u64)>,
 }
 
 impl Conv {
@@ -715,6 +725,9 @@ impl State {
                 if let Some(n) = j.s("n") {
                     conv.name = n.chars().take(80).collect();
                 }
+                if let Some(new) = pic_field(j) {
+                    swap_pic(&mut self.blobs, &mut self.dead_blobs, &mut conv.pic, new, ts);
+                }
                 Outcome::Applied
             }
             MSG => self.ev_msg(ev),
@@ -808,6 +821,7 @@ impl State {
                 req_times: Vec::new(),
                 reads: HashMap::new(),
                 invites_made: 0,
+                pic: None,
             },
         );
         Outcome::Applied
@@ -855,6 +869,9 @@ impl State {
         if let Some(cl) = j.get("cl") {
             acc.cleanup_at = cl.as_u64();
             acc.cleanup_by = id64(j, "clb").unwrap_or(0);
+        }
+        if let Some(new) = pic_field(j) {
+            swap_pic(&mut self.blobs, &mut self.dead_blobs, &mut acc.pic, new, ev.ts);
         }
         Outcome::Applied
     }
@@ -950,6 +967,7 @@ impl State {
                 members: vec![m(a), m(b)],
                 msgs: Vec::new(),
                 last: None,
+                pic: None,
             },
         );
         self.direct.insert(pair(a, b), c);
@@ -979,6 +997,7 @@ impl State {
                 members: vec![Member { a: by, st: MState::Joined, role: Role::Owner, since: ev.ts, by, void: false }],
                 msgs: Vec::new(),
                 last: None,
+                pic: None,
             },
         );
         Outcome::Applied
@@ -1086,8 +1105,9 @@ impl State {
             }
             conv.msgs.insert(pos, r);
         }
-        if conv.last.as_ref().is_none_or(|(l, _, _)| okey(l) < key) {
-            conv.last = Some((r, snippet(j.s("x").unwrap_or("")), atts.len() as u32));
+        if conv.last.as_ref().is_none_or(|(l, _, _, _)| okey(l) < key) {
+            let voice = matches!(atts.as_slice(), [a] if a.d > 0 && a.mime.starts_with("audio/"));
+            conv.last = Some((r, snippet(j.s("x").unwrap_or("")), atts.len() as u32, voice));
         }
         if atts.is_empty() {
             return Outcome::Applied;
@@ -1195,6 +1215,31 @@ fn unpend(blobs: &mut HashMap<Hash, Blob>, h: &Hash, dead: &mut Vec<Hash>) {
             dead.push(*h);
         }
     }
+}
+
+/// The `pic`/`pz` fields of ACCOUNT_SET and CONV_SET: `Some(Some(..))` sets, `Some(None)` clears
+/// (`"pic":null`), `None` leaves the picture alone (absent or malformed).
+fn pic_field(j: &Json) -> Option<Option<(Hash, u64)>> {
+    match j.get("pic")? {
+        Json::Null => Some(None),
+        Json::Str(s) => hash_of(Some(s)).map(|h| Some((h, j.u("pz").unwrap_or(0)))),
+        _ => None,
+    }
+}
+
+/// Replace a picture, holding one blob ref. The new blob is taken BEFORE the old one is dropped, so
+/// a blob shared by both never passes through zero holders. The same blob again changes nothing.
+fn swap_pic(blobs: &mut HashMap<Hash, Blob>, dead: &mut Vec<Hash>, slot: &mut Option<(Hash, u64)>, new: Option<(Hash, u64)>, ts: u64) {
+    if slot.map(|p| p.0) == new.map(|p| p.0) {
+        return;
+    }
+    if let Some((h, z)) = new {
+        blob_inc(blobs, &h, z, ts);
+    }
+    if let Some((old, _)) = *slot {
+        blob_dec(blobs, &old, dead);
+    }
+    *slot = new;
 }
 
 fn blob_inc(blobs: &mut HashMap<Hash, Blob>, h: &Hash, z: u64, ts: u64) {
@@ -1436,5 +1481,108 @@ mod tests {
         let msgs = &t.s.convs[&4].msgs;
         assert_eq!(msgs.iter().map(|m| m.ts).collect::<Vec<_>>(), vec![40, 50]);
         assert_eq!(t.s.convs[&4].last.as_ref().unwrap().1, "late");
+    }
+
+    #[test]
+    fn account_picture_set_replace_clear_and_noop() {
+        let mut t = T::new();
+        t.account("BBBB");
+        t.ev(2, kind::ACCOUNT_SET, &format!(r#"{{"a":"BBBB","pic":"{}","pz":700}}"#, h(1)));
+        assert_eq!(t.acc("BBBB").pic, Some(([1u8; 32], 700)));
+        assert_eq!(t.s.blobs[&[1u8; 32]].refs, 1);
+        assert_eq!(t.acc("BBBB").usage, 0, "pictures never count toward usage");
+        // The same blob again: nothing changes (not even the size).
+        t.ev(3, kind::ACCOUNT_SET, &format!(r#"{{"a":"BBBB","pic":"{}","pz":999}}"#, h(1)));
+        assert_eq!(t.s.blobs[&[1u8; 32]].refs, 1);
+        assert_eq!(t.acc("BBBB").pic, Some(([1u8; 32], 700)));
+        assert!(t.s.dead_blobs.is_empty());
+        // Other fields in the same event leave the picture alone.
+        t.ev(4, kind::ACCOUNT_SET, r#"{"a":"BBBB","n":"Bea"}"#);
+        assert_eq!(t.acc("BBBB").pic, Some(([1u8; 32], 700)));
+        // Replace: the new blob is held, the old one dies.
+        t.ev(5, kind::ACCOUNT_SET, &format!(r#"{{"a":"BBBB","pic":"{}","pz":800}}"#, h(2)));
+        assert_eq!(t.acc("BBBB").pic, Some(([2u8; 32], 800)));
+        assert_eq!(t.s.blobs[&[2u8; 32]].refs, 1);
+        assert!(!t.s.blobs.contains_key(&[1u8; 32]));
+        assert_eq!(t.s.dead_blobs, vec![[1u8; 32]]);
+        // Malformed values are ignored; null clears.
+        t.ev(6, kind::ACCOUNT_SET, r#"{"a":"BBBB","pic":"nothex","pz":1}"#);
+        t.ev(7, kind::ACCOUNT_SET, r#"{"a":"BBBB","pic":5}"#);
+        assert_eq!(t.acc("BBBB").pic, Some(([2u8; 32], 800)));
+        t.ev(8, kind::ACCOUNT_SET, r#"{"a":"BBBB","pic":null}"#);
+        assert_eq!(t.acc("BBBB").pic, None);
+        assert!(t.s.blobs.is_empty());
+        assert_eq!(t.s.dead_blobs, vec![[1u8; 32], [2u8; 32]]);
+        // Clearing nothing is fine.
+        t.ev(9, kind::ACCOUNT_SET, r#"{"a":"BBBB","pic":null}"#);
+        assert_eq!(t.s.dead_blobs.len(), 2);
+    }
+
+    #[test]
+    fn crew_picture_set_replace_clear() {
+        let mut t = T::new();
+        t.account("BBBB");
+        let c = id_str(5);
+        t.ev(1, kind::CONV, &format!(r#"{{"c":"{c}","n":"crew","by":"BBBB"}}"#));
+        t.ev(2, kind::CONV_SET, &format!(r#"{{"c":"{c}","pic":"{}","pz":50}}"#, h(7)));
+        assert_eq!(t.s.convs[&5].pic, Some(([7u8; 32], 50)));
+        t.ev(3, kind::CONV_SET, &format!(r#"{{"c":"{c}","n":"renamed"}}"#));
+        assert_eq!(t.s.convs[&5].pic, Some(([7u8; 32], 50)), "a rename keeps the picture");
+        t.ev(4, kind::CONV_SET, &format!(r#"{{"c":"{c}","pic":"{}","pz":60}}"#, h(8)));
+        assert_eq!((t.s.convs[&5].pic, t.s.blobs.contains_key(&[7u8; 32]), t.s.blobs[&[8u8; 32]].refs), (Some(([8u8; 32], 60)), false, 1));
+        assert_eq!(t.s.dead_blobs, vec![[7u8; 32]]);
+        t.ev(5, kind::CONV_SET, &format!(r#"{{"c":"{c}","pic":null}}"#));
+        assert_eq!(t.s.convs[&5].pic, None);
+        assert_eq!(t.s.dead_blobs, vec![[7u8; 32], [8u8; 32]]);
+    }
+
+    #[test]
+    fn picture_blob_shared_with_file_refs_survives_until_all_let_go() {
+        let mut t = T::new();
+        t.account("BBBB");
+        t.account("CCCC");
+        let (r, c) = (id_str(1), id_str(9));
+        t.ev(1, kind::REQUEST, &format!(r#"{{"r":"{r}","f":"BBBB","t":"CCCC","v":false}}"#));
+        t.ev(2, kind::REQUEST_ANS, &format!(r#"{{"r":"{r}","a":"acc","c":"{c}"}}"#));
+        // The same image is a profile picture and a sent file (sender and recipient both hold it).
+        t.ev(3, kind::ACCOUNT_SET, &format!(r#"{{"a":"BBBB","pic":"{}","pz":300}}"#, h(5)));
+        let att = format!(r#"[{{"b":"{}","n":"me.png","m":"image/png","z":300,"d":4200}}]"#, h(5));
+        t.ev(4, kind::MSG, &format!(r#"{{"c":"{c}","f":"BBBB","x":"look","at":{att},"d":{{"CCCC":"1"}}}}"#));
+        assert_eq!(t.s.blobs[&[5u8; 32]].refs, 3, "picture + sender + recipient");
+        assert_eq!(t.acc("BBBB").usage, 300, "only the file ref counts");
+        assert_eq!(t.acc("BBBB").files[&[5u8; 32]].meta.d, 4200);
+        // Clearing the picture leaves the file refs.
+        t.ev(5, kind::ACCOUNT_SET, r#"{"a":"BBBB","pic":null}"#);
+        assert_eq!(t.s.blobs[&[5u8; 32]].refs, 2);
+        // Set it again, then let both files go: the picture alone keeps the blob alive.
+        t.ev(6, kind::ACCOUNT_SET, &format!(r#"{{"a":"BBBB","pic":"{}","pz":300}}"#, h(5)));
+        t.ev(7, kind::FILE, &format!(r#"{{"a":"BBBB","o":"del","b":["{}"]}}"#, h(5)));
+        t.ev(8, kind::FILE, &format!(r#"{{"a":"CCCC","o":"del","b":["{}"]}}"#, h(5)));
+        assert_eq!(t.s.blobs[&[5u8; 32]].refs, 1);
+        assert!(t.s.dead_blobs.is_empty(), "the picture still holds it");
+        assert_eq!(t.acc("BBBB").usage, 0);
+        // Replacing the picture with the same blob is a no-op; clearing finally kills it.
+        t.ev(9, kind::ACCOUNT_SET, &format!(r#"{{"a":"BBBB","pic":"{}","pz":300}}"#, h(5)));
+        assert_eq!(t.s.blobs[&[5u8; 32]].refs, 1);
+        t.ev(10, kind::ACCOUNT_SET, r#"{"a":"BBBB","pic":null}"#);
+        assert_eq!(t.s.dead_blobs, vec![[5u8; 32]]);
+    }
+
+    #[test]
+    fn file_meta_duration_round_trips() {
+        let j = parse(&format!(r#"{{"b":"{}","n":"v.webm","m":"audio/webm","z":10,"d":12500}}"#, h(1))).unwrap();
+        let m = FileMeta::from_json(&j).unwrap();
+        assert_eq!(m.d, 12500);
+        let mut js = Js::new();
+        m.write(&mut js);
+        let back = parse(&js.finish()).unwrap();
+        assert_eq!(back.u("d"), Some(12500));
+        let none = FileMeta::from_json(&parse(&format!(r#"{{"b":"{}","z":1}}"#, h(1))).unwrap()).unwrap();
+        assert_eq!(none.d, 0);
+        let mut js = Js::new();
+        none.write(&mut js);
+        assert!(parse(&js.finish()).unwrap().get("d").is_none(), "d is only written when known");
+        let huge = FileMeta::from_json(&parse(&format!(r#"{{"b":"{}","z":1,"d":99999999999}}"#, h(1))).unwrap()).unwrap();
+        assert_eq!(huge.d, u32::MAX);
     }
 }

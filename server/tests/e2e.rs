@@ -683,3 +683,136 @@ fn third_star_joins_through_the_second() {
     assert_eq!(ada.texts(&conv).unwrap(), bob_c.texts(&conv).unwrap());
     drop((a, b, c));
 }
+
+fn png_bytes(n: usize) -> Vec<u8> {
+    let mut v = vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10];
+    v.extend((0..n).map(|i| (i * 7 % 251) as u8));
+    v
+}
+
+fn tag12(bytes: &[u8]) -> String {
+    esc::crypto::hex(&esc::crypto::sha256(bytes))[..12].to_string()
+}
+
+#[test]
+fn pictures_and_voice_durations_end_to_end() {
+    let dir = Dir::new("pics");
+    let (da, db) = (dir.sub("a"), dir.sub("b"));
+    let (pa, pb) = (free_port(), free_port());
+    let a = Star::start(&da, pa);
+    let mut ada = User::signup(pa, a.ticket.as_deref().expect("ticket"), "Ada");
+    let t = ada.ws.ok("ticket_new", "\"u\":2,\"d\":7");
+    let code = t.s("c").unwrap().to_string();
+    let mut bob = User::signup(pa, &code, "Bob");
+    let eve = User::signup(pa, &code, "Eve");
+    let conv = befriend(&mut bob, &mut ada);
+
+    // Profile picture: set, read back with the right headers, cached by ETag.
+    let png = png_bytes(5000);
+    let put = |u: &User, path: &str, body: &[u8]| http(u.port, "PUT", path, &[("Cookie", &u.cookie())], body);
+    let r = put(&ada, "/api/pic", &png);
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.json().s("pic"), Some(tag12(&png).as_str()));
+    let path = format!("/pic/u/{}?v={}", ada.creds.id, tag12(&png));
+    let got = ada.get(&path, &[]);
+    assert_eq!((got.status, got.header("content-type")), (200, Some("image/png")));
+    assert!(got.body == png);
+    assert_eq!(got.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(got.header("cache-control"), Some("private, max-age=31536000, immutable"));
+    assert_eq!(got.header("content-security-policy"), Some("sandbox; default-src 'none'"));
+    let etag = got.header("etag").expect("etag").to_string();
+    assert_eq!(ada.get(&path, &[("If-None-Match", &etag)]).status, 304);
+    assert_eq!(bob.get(&path, &[]).status, 200, "Bob shares a conversation with Ada");
+    assert_eq!(eve.get(&path, &[]).status, 404, "Eve is a stranger");
+    assert_eq!(http(pa, "GET", &path, &[], b"").status, 401, "no session");
+    assert_eq!(ada.get("/pic/u/NOPE", &[]).status, 404);
+    assert_eq!(ada.get("/pic/x/whatever", &[]).status, 404);
+    assert_eq!(ada.get("/pic/u/", &[]).status, 404);
+
+    // The views carry the picture tag.
+    let hello = bob.ws.ok("hello", "");
+    let line = hello.a("convs").iter().find(|c| c.s("c") == Some(conv.as_str())).unwrap().clone();
+    let ada_member = line.a("m").iter().find(|m| m.s("a") == Some(ada.creds.id.as_str())).unwrap().clone();
+    assert_eq!(ada_member.s("p"), Some(tag12(&png).as_str()));
+    assert_eq!(ada.ws.ok("hello", "").get("me").and_then(|m| m.s("pic")), Some(tag12(&png).as_str()));
+
+    // Refusals.
+    let bad = put(&ada, "/api/pic", b"GIF89a....");
+    assert_eq!((bad.status, bad.json().s("e")), (400, Some("Use a PNG, JPEG or WebP picture.")));
+    assert_eq!(http(pa, "PUT", "/api/pic", &[], &png).status, 401);
+    // A body claiming far more than 256 KiB is refused with 413 before it is read.
+    let cookie = ada.cookie();
+    let mut s = TcpStream::connect(("127.0.0.1", pa)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(s, "PUT /api/pic HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nContent-Length: 10000000\r\n\r\n").unwrap();
+    let mut head = Vec::new();
+    let mut b1 = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && s.read(&mut b1).unwrap_or(0) == 1 {
+        head.push(b1[0]);
+    }
+    assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 413 "), "{}", String::from_utf8_lossy(&head));
+
+    // Crew picture: owner sets it, members read it, plain members and outsiders cannot change or read it.
+    let g = ada.ws.ok("crew_new", &format!("\"n\":\"Crew\",\"ids\":[\"{}\"]", bob.creds.id));
+    let g = g.s("c").unwrap().to_string();
+    bob.ws.ok("crew_answer", &format!("\"c\":\"{g}\",\"ok\":true"));
+    let jpeg = {
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        v.extend((0..2000).map(|i| (i % 200) as u8));
+        v
+    };
+    assert_eq!(put(&ada, &format!("/api/pic?c={g}"), &jpeg).status, 200);
+    let cp = bob.get(&format!("/pic/c/{g}?v=1"), &[]);
+    assert_eq!((cp.status, cp.header("content-type")), (200, Some("image/jpeg")));
+    assert!(cp.body == jpeg);
+    assert_eq!(put(&bob, &format!("/api/pic?c={g}"), &jpeg).status, 403);
+    assert_eq!(eve.get(&format!("/pic/c/{g}"), &[]).status, 404);
+    assert_eq!(put(&ada, &format!("/api/pic?c={conv}"), &jpeg).status, 400, "direct chats have no picture");
+    let line = bob.ws.ok("hello", "").a("convs").iter().find(|c| c.s("c") == Some(g.as_str())).unwrap().clone();
+    assert_eq!(line.s("pic"), Some(tag12(&jpeg).as_str()));
+
+    // Voice message duration travels with the attachment.
+    let voice = pattern(4000);
+    let blob = ada.upload(&voice, 4000);
+    ada.ws.ok(
+        "send",
+        &format!("\"c\":\"{conv}\",\"x\":\"\",\"a\":[{{\"b\":\"{blob}\",\"n\":\"voice.webm\",\"m\":\"audio/webm\",\"z\":4000,\"d\":12500}}]"),
+    );
+    let h = bob.ws.ok("hist", &format!("\"c\":\"{conv}\",\"n\":10"));
+    assert_eq!(h.a("m").last().unwrap().a("a")[0].u("d"), Some(12500));
+
+    // Join a second Star: pictures replicate (the blob is fetched like any file).
+    let spark = ada.ws.ok("tower_spark", "").s("spark").unwrap().to_string();
+    let join = esc()
+        .args(["join", &format!("http://127.0.0.1:{pa}"), &spark, "--data"])
+        .arg(&db)
+        .args(["--url", &format!("http://127.0.0.1:{pb}")])
+        .output()
+        .unwrap();
+    assert!(join.status.success());
+    let b = Star::start(&db, pb);
+    let bob_creds = bob.creds.clone();
+    let mut bob_b = None;
+    eventually("Bob signs in on B", 25, || match User::login(pb, &bob_creds) {
+        Ok(u) => {
+            bob_b = Some(u);
+            true
+        }
+        Err(_) => false,
+    });
+    let bob_b = bob_b.unwrap();
+    eventually("Ada's picture reaches B", 30, || bob_b.get(&path, &[]).status == 200);
+    assert!(bob_b.get(&path, &[]).body == png);
+    eventually("the crew picture reaches B", 30, || bob_b.get(&format!("/pic/c/{g}"), &[]).status == 200);
+    assert!(bob_b.get(&format!("/pic/c/{g}"), &[]).body == jpeg);
+
+    // Clearing: gone here, and on B after replication.
+    ada.ws.ok("pic_clear", "");
+    ada.ws.ok("pic_clear", &format!("\"c\":\"{g}\""));
+    assert_eq!(ada.get(&path, &[]).status, 404);
+    assert_eq!(bob.get(&format!("/pic/c/{g}"), &[]).status, 404);
+    assert!(ada.ws.ok("hello", "").get("me").unwrap().get("pic").unwrap().is_null());
+    eventually("the clear reaches B", 30, || bob_b.get(&path, &[]).status == 404);
+    assert_eq!(ada.ws.rpc("pic_clear", &format!("\"c\":\"{conv}\"")).unwrap_err().split(':').next(), Some("400"));
+    drop((a, b));
+}

@@ -1,6 +1,6 @@
 # ESC — Extremely Simple Communication — design
 
-Date: 2026-11-06 · Status: living document, updated as the build moves · Owner: the user · Builder: Claude
+Date: 2026-11-06 (updated 2026-11-09) · Status: living document, updated as the build moves · Owner: the user · Builder: Claude → Gemini (Antigravity)
 
 ESC is a tiny, very fast web app that lets people talk to each other: text forever, files within a
 storage quota. It runs on a ring of **relays** (this dev box is relay #1). Every relay is one small
@@ -94,14 +94,14 @@ mail) and the **Ring** (replication).
 
 | Entity | Key fields |
 | --- | --- |
-| **Account** | `id` (e.g. `K7Q2`), display name (optional, ≤ 40 chars), password salt + verifier, recovery (email / code / none), `accept_requests` (default on), `auto_recycle` (default on), quota override, admin flag, disabled flag, scheduled cleanup time |
+| **Account** | `id` (e.g. `K7Q2`), display name (optional, ≤ 40 chars), profile picture (`pic`, ≤ 256 KiB PNG/JPEG/WebP, never counted against Tank usage), password salt + verifier, recovery (email / code / none), `accept_requests` (default on), `auto_recycle` (default on), quota override, admin flag, disabled flag, scheduled cleanup time |
 | **Session** | SHA-256(token) → account, created, device label. Listed and revocable in Settings |
 | **Invite** | code → created by, uses left, expiry |
 | **Request** | from, to, short note (≤ 280 chars), time, state. **Void** requests (unknown ID, requests off, blocked) are stored but shown to nobody except as "sent" to the sender |
-| **Conversation** | random id, kind (direct / group), name (group), members with state (invited / joined / left) and role (owner / admin / member) |
+| **Conversation** | random id, kind (direct / group), name (group), crew picture (`pic`, group only, owner/admin), members with state (invited / joined / left) and role (owner / admin / member) |
 | **Message** | conversation, sender, time, text (≤ 16,000 chars), attachments. ID = (origin relay, sequence) |
 | **Blob** | SHA-256 of the bytes, size. Stored once on disk, however many people hold it |
-| **Attachment** | per message: blob, file name, MIME type, width/height, thumbnail blob, preview blob |
+| **Attachment** | per message: blob, file name, MIME type, width/height, duration `d` in ms (voice messages / audio / video), thumbnail blob, preview blob |
 | **File ref** | per account and blob: state (active / recycled / deleted / refused), pinned ("always saved"), where it came from (drive upload, sent, received + conversation), first added time |
 
 A blob is deleted from disk when no account holds an active ref to it.
@@ -183,8 +183,7 @@ of disk space; contact the admin." Admin shows overcommit: the sum of quotas aga
   **accept**: the conversation then appears for both.
 - **P3 Decline is silent.** The recipient can also **Block**, which silently voids future
   requests from that ID. The sender can cancel a pending request.
-- **P4** Your display name is visible only to people you share an accepted conversation with. You
-  can give contacts private nicknames.
+- **P4** Your display name and profile picture are visible only to people you share an accepted conversation with, people you have invited to a Crew, or people whose incoming Knock is pending. You can give contacts private nicknames.
 - **P5 Groups** (≤ 128 accounts, invited included) follow the same rules:
   - You join only by accepting the invite. Until then you see nothing of the group.
   - Members see you as "invited".
@@ -256,6 +255,12 @@ of disk space; contact the admin." Admin shows overcommit: the sum of quotas aga
   - The original is shown when your browser can decode it; otherwise the preview. GIFs animate.
 - **Video and audio** open in a new tab with the browser's own player. Downloads support HTTP Range,
   so seeking works.
+- **Voice messages**: recorded directly in the composer (`MediaRecorder`, `microphone=(self)`), named
+  `voice-<timestamp>`, stored with their duration `d` in milliseconds, and played inline inside the
+  message bubble with a play/pause toggle and scrub bar.
+- **Profile and Crew pictures**: PNG, JPEG or WebP up to 256 KiB (`PUT /api/pic`, `GET /pic/u/<id>`,
+  `GET /pic/c/<conv>`, `pic_clear` RPC), sniffed by magic bytes, replicated across Stars, and held outside
+  Tank quota. When unset, the signal-flag avatar is shown.
 - **Everything else** downloads with its original name.
 - **Safety**: user files are served with:
   - `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff` and `Cache-Control: private`;
@@ -374,12 +379,15 @@ pointer per message.
 
 ## 15. Milestones
 
-Status on 2026-11-06, evening:
+Status on 2026-11-09:
 
-- **M1–M3**: built and verified in a browser with two users.
-- **M4**: the admin screen and Lifeline codes work. Email Lifelines need an SMTP account to test.
-- **M5**: the Ring is unit-tested with three Stars; the two-binary e2e test is in progress.
-- **M6**: deploy scripts are written.
+- **M1–M6**: all milestones built, tested (126 unit tests + 4 multi-Star E2E binary tests), and live on Star **Polaris** (`D:\esc` + `D:\esc_data`).
+- **Post-M6 Polish (deployed 2026-11-09)**:
+  - **Profile & Crew pictures**: `PUT /api/pic`, `GET /pic/{u,c}/*`, `pic_clear`, privacy-scoped and replicated across Stars.
+  - **Voice messages**: in-app `MediaRecorder` capture, duration `d` in `FileMeta`, and inline bubble audio player.
+  - **Localization (`pt-BR` & `en`)**: full Brazilian Portuguese dictionary (`web/i18n.js`) with automatic detection and a language switch in Settings.
+  - **Theme & Alerts**: flash-free theme persistence (`web/theme.js`: Auto / Light / Dark), in-app toast pings with WebAudio chimes, and Service Worker `notificationclick` conversation routing.
+  - **Star TUI Manager (`esc-manager.cmd`)**: animated single-file polyglot `.cmd`/PowerShell TUI for managing **Polaris**, inspecting Logbook accounts/settings, running checks, and deploying updates while keeping `cloudflared` and its quick-tunnel URL alive.
 
 1. **M1 Relay core**: crypto, JSON, HTTP, WebSocket, event log, state, accounts, sessions, invites.
 2. **M2 Talking**: requests, direct conversations, groups, messages, history, live push. The web

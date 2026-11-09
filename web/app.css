@@ -1,7 +1,7 @@
 /* ESC: quiet sailcloth chrome; the signal flags are the only loud thing. No libraries, no web fonts. */
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --paper: #f1f4f6;
   --panel: #ffffff;
   --ink: #102131;
@@ -25,8 +25,11 @@
   --r3: 14px;
 }
 
+/* Dark: follow the system unless the user picked Light in Settings, or always when they picked Dark.
+   (theme.js sets data-theme before the first paint, so there is no flash.) */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --paper: #0b1724;
     --panel: #102030;
     --ink: #e5edf4;
@@ -44,6 +47,25 @@
     --ok: #55c98f;
     --shade: rgba(0, 0, 0, 0.6);
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #0b1724;
+  --panel: #102030;
+  --ink: #e5edf4;
+  --muted: #93a5b6;
+  --faint: #66798b;
+  --line: #20364a;
+  --sea: #15293c;
+  --mine: #17355a;
+  --blue: #6c9cf2;
+  --blue-ink: #06101b;
+  --red: #ff6161;
+  --red-soft: #3d1619;
+  --yellow: #f7cf3d;
+  --yellow-soft: #3a3110;
+  --ok: #55c98f;
+  --shade: rgba(0, 0, 0, 0.6);
 }
 
 * { box-sizing: border-box; }
@@ -97,6 +119,7 @@ a { color: var(--blue); }
   border: 0; border-radius: var(--r2); background: transparent; cursor: pointer; color: var(--muted);
 }
 .icon-btn:hover { background: var(--sea); color: var(--ink); }
+svg.i { width: 20px; height: 20px; flex: none; }
 .icon-btn svg, .btn svg.i { width: 20px; height: 20px; }
 
 label.field { display: grid; gap: 6px; }
@@ -357,4 +380,58 @@ table.rows .mini { width: 36px; height: 36px; border-radius: 5px; object-fit: co
 .home-inner { display: grid; gap: 14px; justify-items: center; text-align: center; padding: 32px 20px; color: var(--muted); max-width: 420px; }
 .home-inner p { margin: 0; }
 .page input[type="number"], .page select { max-width: 280px; }
+
+/* ---------- pictures ---------- */
+.avatar.pic { display: block; border-radius: 50%; overflow: hidden; background: var(--sea); }
+.avatar.pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar.pic.crew { border-radius: var(--r2); }
+.pic-row .avatar { width: 64px; height: 64px; }
+.cs { font-family: var(--mono); font-size: 0.84em; font-weight: 600; letter-spacing: 0.08em; color: var(--faint); }
+.bubble .from .cs { color: var(--muted); }
+
+/* ---------- alerts in the page ---------- */
+.pings { position: fixed; top: 12px; right: 12px; z-index: 60; display: grid; gap: 8px; width: min(360px, calc(100vw - 24px)); pointer-events: none; }
+.ping {
+  pointer-events: auto; display: flex; gap: 12px; align-items: center; width: 100%; padding: 10px 14px 10px 10px;
+  border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: var(--r3);
+  background: var(--panel); color: var(--ink); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+  text-align: left; cursor: pointer; transition: opacity 0.35s, translate 0.35s;
+}
+.ping.knock { border-left-color: var(--yellow); }
+.ping .txt { flex: 1; min-width: 0; display: grid; }
+.ping .txt b, .ping .txt span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ping .txt b { font-weight: 600; }
+.ping .txt span { font-size: 13px; color: var(--muted); }
+.ping.out { opacity: 0; translate: 16px 0; }
+.ping-ic { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--yellow-soft); }
+.ping-ic svg { width: 18px; height: 18px; }
+@media (prefers-reduced-motion: no-preference) {
+  .ping { animation: ping-in 0.22s ease-out; }
+  @keyframes ping-in { from { translate: 0 -10px; opacity: 0; } }
+  .item.flash { animation: flash 1.5s ease-out; }
+  @keyframes flash { 0%, 35% { background: var(--yellow-soft); } }
+  .rec-dot { animation: rec 1.2s ease-in-out infinite; }
+  @keyframes rec { 50% { opacity: 0.25; } }
+}
+@media (max-width: 520px) { .pings { top: 8px; left: 8px; right: 8px; width: auto; } }
+
+/* ---------- voice messages ---------- */
+.voice { display: flex; align-items: center; gap: 10px; width: min(300px, 64vw); padding: 2px 0; }
+.vplay { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--blue); color: var(--blue-ink); cursor: pointer; }
+.vplay svg { width: 18px; height: 18px; }
+.vmid { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.vname { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vbar { width: 100%; margin: 0; accent-color: var(--blue); }
+.vtime { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.voice .icon-btn { width: 32px; height: 32px; }
+.voice .icon-btn svg { width: 18px; height: 18px; }
+.recbar { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.recbar .hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rec-dot { width: 12px; height: 12px; flex: none; border-radius: 50%; background: var(--red); }
+.rec-time { min-width: 3.2em; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---------- settings & welcome additions ---------- */
+.kv.wrap { flex-wrap: wrap; }
+.kv > .seg { display: flex; flex: 1; max-width: 360px; }
+.wm-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 

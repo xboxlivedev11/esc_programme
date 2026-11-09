@@ -6,7 +6,8 @@
 //! - `/ws`: the live channel. Every other action is a JSON RPC over it.
 //! - `/ring/*`: the Ring (relay replication), signed with the ring key
 
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -14,7 +15,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 
-use crate::bridge::{Bridge, Client, Fail, Out, R};
+use crate::bridge::{Bridge, Client, Fail, MAX_PIC, Out, R};
 use crate::crypto::{b64url_decode, hex};
 use crate::http::{self, Conn, Request, pct_encode};
 use crate::ids::{Aid, now_ms};
@@ -88,6 +89,18 @@ fn route(b: &Arc<Bridge>, lobby: &Lobby, req: &Request, conn: &mut Conn) -> io::
             let r = body_json(conn).and_then(|j| b.upload_begin(a, j.u("z").ok_or_else(|| Fail(400, "size?".into()))?));
             reply(conn, r)
         }
+        ("PUT", "/api/pic") => {
+            let Some((a, _)) = session(b, req) else { return unauthorized(conn) };
+            if req.body_len > MAX_PIC as u64 {
+                conn.close = true;
+                return conn.send_json(413, &err_json(413, "Pictures can be at most 256 KB."));
+            }
+            let r = conn
+                .read_body(MAX_PIC)
+                .map_err(|_| Fail(400, "The picture upload was cut short.".into()))
+                .and_then(|body| b.set_pic(a, req.param("c").as_deref().filter(|c| !c.is_empty()), &body));
+            reply(conn, r)
+        }
         ("PUT", _) if p.starts_with("/api/up/") => {
             let Some((a, _)) = session(b, req) else { return unauthorized(conn) };
             if req.body_len > 16 << 20 {
@@ -108,6 +121,7 @@ fn route(b: &Arc<Bridge>, lobby: &Lobby, req: &Request, conn: &mut Conn) -> io::
             reply(conn, r)
         }
         ("GET" | "HEAD", _) if p.starts_with("/f/") => file(b, req, conn),
+        ("GET" | "HEAD", _) if p.starts_with("/pic/") => picture(b, req, conn),
         ("GET", _) if p.starts_with("/ring/") => ring(b, req, conn),
         ("POST", "/ring/join") => {
             let r = body_json(conn).and_then(|j| b.ring_join(&j));
@@ -275,6 +289,41 @@ fn inline_ok(m: &str) -> bool {
         || m.starts_with("audio/")
 }
 
+/// The real image type from a file's first bytes (the file position is restored).
+fn sniff_image(f: &mut File) -> &'static str {
+    let mut head = [0u8; 12];
+    let n = f.read(&mut head).unwrap_or(0);
+    let _ = f.seek(SeekFrom::Start(0));
+    match &head[..n] {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P'] => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `GET /pic/u/<callsign>` and `GET /pic/c/<conversation id>`: profile and crew pictures.
+fn picture(b: &Bridge, req: &Request, conn: &mut Conn) -> io::Result<()> {
+    let Some((a, _)) = session(b, req) else { return conn.send_text(401, "Sign in first.") };
+    let Some((blob, _)) = req.path[5..].split_once('/').and_then(|(what, id)| b.pic_for(a, what, id)) else {
+        return conn.send_text(404, "No such picture.");
+    };
+    let Ok((mut f, len)) = b.store.open_blob(&blob) else { return conn.send_text(404, "No such picture.") };
+    let etag = format!("\"{}\"", &hex(&blob)[..20]);
+    let cache = "private, max-age=31536000, immutable";
+    if req.header("if-none-match") == Some(etag.as_str()) {
+        return conn.send(304, "", &[("ETag", &etag), ("Cache-Control", cache)], b"");
+    }
+    let ctype = sniff_image(&mut f);
+    let hdrs = [
+        ("X-Content-Type-Options", "nosniff"),
+        ("Cache-Control", cache),
+        ("Content-Security-Policy", "sandbox; default-src 'none'"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+    ];
+    conn.send_file(req, &mut f, len, ctype, Some(&etag), &hdrs)
+}
+
 fn file(b: &Bridge, req: &Request, conn: &mut Conn) -> io::Result<()> {
     let Some((a, _)) = session(b, req) else { return conn.send_text(401, "Sign in first.") };
     let mut parts = req.path[3..].splitn(3, '/');
@@ -298,15 +347,7 @@ fn file(b: &Bridge, req: &Request, conn: &mut Conn) -> io::Result<()> {
     let mime = if which == "o" {
         safe_mime(&mime)
     } else {
-        let mut head = [0u8; 12];
-        let n = std::io::Read::read(&mut f, &mut head).unwrap_or(0);
-        let _ = std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(0));
-        sniffed = match &head[..n] {
-            [0x89, b'P', b'N', b'G', ..] => "image/png",
-            [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
-            [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P'] => "image/webp",
-            _ => "application/octet-stream",
-        };
+        sniffed = sniff_image(&mut f);
         sniffed
     };
     let inline = which != "o" || (inline_ok(mime) && req.param("dl").is_none());
@@ -489,6 +530,7 @@ fn dispatch(b: &Bridge, a: Aid, sess: Hash, j: &Json) -> R<String> {
             admin()?;
             b.admin_account(a, j)
         }
+        "pic_clear" => b.clear_pic(a, j.s("c").filter(|c| !c.is_empty())),
         "tower_spark" => {
             admin()?;
             b.spark_create()

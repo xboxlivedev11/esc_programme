@@ -59,6 +59,15 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 
 ## Current state (newest first)
 
+### 2026-11-09: Pictures, voice messages, pt-BR localization, themes & TUI manager live on Polaris
+
+- See `GEMINI.md` for full handover notes and current state.
+- Deployed to `D:\esc\esc.exe` (keeping `cloudflared` tunnel alive across restarts/deploys):
+  - Profile & Crew pictures (`PUT /api/pic`, `GET /pic/{u,c}/*`, `pic_clear`, replicated across Stars);
+  - Voice messages (`MediaRecorder`, duration `d` in `FileMeta`, inline player);
+  - Brazilian Portuguese (`pt-BR`) & English dictionary (`web/i18n.js`), flash-free theme loader (`web/theme.js`), in-app toast pings & `sw.js` notification routing;
+  - Interactive animated TUI Star Manager (`esc-manager.cmd`).
+
 ### 2026-11-06, night: LIVE
 
 - **Polaris is live** on this box:
