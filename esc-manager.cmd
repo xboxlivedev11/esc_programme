@@ -25,21 +25,97 @@ if ((Test-Path (Join-Path $repoRoot "esc.exe")) -and (Test-Path (Join-Path $repo
     $BackupDir = "C:\esc_backups"
 }
 
-# Load user-configured custom paths from esc-paths.ini if present
+$TunnelMode  = "quick"
+$TunnelToken = ""
+
+# Load user-configured custom paths & tunnel settings from esc-paths.ini if present
 if (Test-Path $PathsConfigFile) {
     foreach ($line in (Get-Content $PathsConfigFile -ErrorAction SilentlyContinue)) {
-        if ($line -match '^\s*home\s*=\s*(.+)$')   { $HomeDir   = $Matches[1].Trim() }
-        if ($line -match '^\s*data\s*=\s*(.+)$')   { $DataDir   = $Matches[1].Trim() }
-        if ($line -match '^\s*backup\s*=\s*(.+)$') { $BackupDir = $Matches[1].Trim() }
+        if ($line -match '^\s*home\s*=\s*(.+)$')         { $HomeDir     = $Matches[1].Trim() }
+        if ($line -match '^\s*data\s*=\s*(.+)$')         { $DataDir     = $Matches[1].Trim() }
+        if ($line -match '^\s*backup\s*=\s*(.+)$')       { $BackupDir   = $Matches[1].Trim() }
+        if ($line -match '^\s*tunnel_mode\s*=\s*(.+)$')  { $TunnelMode  = $Matches[1].Trim().ToLower() }
+        if ($line -match '^\s*tunnel_token\s*=\s*(.+)$') { $TunnelToken = $Matches[1].Trim() }
+    }
+}
+
+$ProdListen = "127.0.0.1:7878"
+$DevListen  = "127.0.0.1:7979"
+$DevDir     = Join-Path $repoRoot "data\dev_star"
+$ServerDir  = Join-Path $repoRoot "server"
+$WebDir     = Join-Path $repoRoot "web"
+$DeployDir  = Join-Path $repoRoot "deploy"
+
+function Get-TailscaleExe {
+    $cmd = (Get-Command tailscale -ErrorAction SilentlyContinue).Source
+    if ($cmd -and (Test-Path $cmd)) { return $cmd }
+    foreach ($p in @('C:\Program Files\Tailscale\tailscale.exe', 'C:\Program Files (x86)\Tailscale\tailscale.exe')) {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
+function Get-CloudflaredExe {
+    $cmd = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
+    if ($cmd -and (Test-Path $cmd)) { return $cmd }
+    foreach ($p in @('C:\Program Files (x86)\cloudflared\cloudflared.exe', 'C:\Program Files\cloudflared\cloudflared.exe')) {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
+function Write-TunnelRunner {
+    New-Item -ItemType Directory -Force $HomeDir | Out-Null
+    $port = ($ProdListen -split ':')[-1]
+    $cfCmd = Get-CloudflaredExe
+    if (-not $cfCmd) { $cfCmd = 'C:\Program Files (x86)\cloudflared\cloudflared.exe' }
+    $tsCmd = Get-TailscaleExe
+    if (-not $tsCmd) { $tsCmd = 'C:\Program Files\Tailscale\tailscale.exe' }
+
+    if ($script:TunnelMode -eq 'tailscale') {
+        @"
+while (`$true) {
+  & '$tsCmd' funnel --bg $port *> `$null
+  Start-Sleep -Seconds 60
+}
+"@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
+    } elseif ($script:TunnelMode -eq 'named' -and $script:TunnelToken) {
+        @"
+while (`$true) {
+  Remove-Item '$HomeDir\tunnel.log' -Force -ErrorAction SilentlyContinue
+  & '$cfCmd' tunnel --no-autoupdate --logfile '$HomeDir\tunnel.log' run --token '$($script:TunnelToken)' *> `$null
+  Start-Sleep -Seconds 5
+}
+"@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
+    } else {
+        @"
+while (`$true) {
+  Remove-Item '$HomeDir\tunnel.log' -Force -ErrorAction SilentlyContinue
+  `$p = Start-Process -FilePath '$cfCmd' -ArgumentList 'tunnel','--no-autoupdate','--url','http://$ProdListen','--logfile','$HomeDir\tunnel.log' -NoNewWindow -PassThru
+  while (-not `$p.HasExited) {
+    Start-Sleep -Seconds 5
+    if (Test-Path '$HomeDir\tunnel.log') {
+      `$tail = Get-Content '$HomeDir\tunnel.log' -Tail 25 -ErrorAction SilentlyContinue
+      if (`$tail -match 'Unauthorized:\s*Tunnel not found') {
+        Stop-Process -Id `$p.Id -Force -ErrorAction SilentlyContinue
+        break
+      }
+    }
+  }
+  Start-Sleep -Seconds 3
+}
+"@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
     }
 }
 
 function Save-PathsConfig {
     @(
-        "# ESC Star Manager custom paths",
+        "# ESC Star Manager custom paths & tunnel config",
         "home = $HomeDir",
         "data = $DataDir",
-        "backup = $BackupDir"
+        "backup = $BackupDir",
+        "tunnel_mode = $($script:TunnelMode)",
+        "tunnel_token = $($script:TunnelToken)"
     ) | Set-Content $PathsConfigFile -Encoding UTF8
     # Keep run-relay.ps1 in sync with the chosen HomeDir and DataDir if it exists
     if (Test-Path "$HomeDir\run-relay.ps1") {
@@ -50,14 +126,10 @@ while (`$true) {
 }
 "@ | Set-Content (Join-Path $HomeDir 'run-relay.ps1') -Encoding utf8
     }
+    if (Test-Path $HomeDir) {
+        Write-TunnelRunner
+    }
 }
-
-$ProdListen = "127.0.0.1:7878"
-$DevListen  = "127.0.0.1:7979"
-$DevDir     = Join-Path $repoRoot "data\dev_star"
-$ServerDir  = Join-Path $repoRoot "server"
-$WebDir     = Join-Path $repoRoot "web"
-$DeployDir  = Join-Path $repoRoot "deploy"
 
 $InnerWidth = 102
 $LeftWidth  = 50
@@ -507,6 +579,7 @@ function Get-StarStatus {
         RelayProc    = $null
         RelayHealthy = $false
         RelayMemMB   = 0.0
+        TunnelMode   = $script:TunnelMode
         TunnelProc   = $null
         TunnelState  = "OFFLINE"
         PublicUrl    = $null
@@ -552,33 +625,71 @@ function Get-StarStatus {
         $st.DevMemMB = [math]::Round($st.DevProc.WorkingSet64 / 1MB, 1)
     }
 
-    $st.TunnelProc = Get-Process cloudflared -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($script:TunnelMode -eq 'tailscale') {
+        $st.TunnelProc = Get-Process tailscaled -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($st.ConfigUrl) {
+            $st.PublicUrl = $st.ConfigUrl
+        } else {
+            $tsCmd = Get-TailscaleExe
+            if ($tsCmd) {
+                $tsJson = (& $tsCmd status --json 2>$null) -join "`n"
+                if ($tsJson -match '"DNSName"\s*:\s*"([^"]+)\."') {
+                    $st.PublicUrl = "https://$($Matches[1])"
+                }
+            }
+        }
+        if ($st.TunnelProc -and $st.PublicUrl) {
+            $st.TunnelState = "ONLINE"
+        } elseif ($st.TunnelProc) {
+            $st.TunnelState = "STARTING"
+        }
+    } elseif ($script:TunnelMode -eq 'named') {
+        $st.TunnelProc = Get-Process cloudflared -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($st.ConfigUrl) { $st.PublicUrl = $st.ConfigUrl }
+        if ($st.TunnelProc) {
+            if (Test-Path "$HomeDir\tunnel.log") {
+                $tailLines = @(Get-Content "$HomeDir\tunnel.log" -Tail 25 -ErrorAction SilentlyContinue)
+                $tailText = $tailLines -join "`n"
+                if ($tailText -match 'Registered tunnel connection') {
+                    $st.TunnelState = "ONLINE"
+                } elseif ($tailText -match 'Retrying connection|Serve tunnel error') {
+                    $st.TunnelState = "RECONNECTING"
+                } else {
+                    $st.TunnelState = "STARTING"
+                }
+            } else {
+                $st.TunnelState = "ONLINE"
+            }
+        }
+    } else {
+        $st.TunnelProc = Get-Process cloudflared -ErrorAction SilentlyContinue | Select-Object -First 1
 
-    if (Test-Path "$HomeDir\tunnel.log") {
-        $m = Select-String -Path "$HomeDir\tunnel.log" -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 1
-        if ($m) { $st.PublicUrl = $m.Matches[-1].Value }
+        if (Test-Path "$HomeDir\tunnel.log") {
+            $m = Select-String -Path "$HomeDir\tunnel.log" -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 1
+            if ($m) { $st.PublicUrl = $m.Matches[-1].Value }
 
-        $tailLines = @(Get-Content "$HomeDir\tunnel.log" -Tail 30 -ErrorAction SilentlyContinue)
-        $tailText = $tailLines -join "`n"
-        if ($tailText -match 'Unauthorized:\s*Tunnel not found') {
-            $st.TunnelState = "HEALING"
-            $st.PublicUrl = $null
-            if ($st.TunnelProc -or $st.RelayProc) {
-                Restart-ZombieTunnel
+            $tailLines = @(Get-Content "$HomeDir\tunnel.log" -Tail 30 -ErrorAction SilentlyContinue)
+            $tailText = $tailLines -join "`n"
+            if ($tailText -match 'Unauthorized:\s*Tunnel not found') {
+                $st.TunnelState = "HEALING"
+                $st.PublicUrl = $null
+                if ($st.TunnelProc -or $st.RelayProc) {
+                    Restart-ZombieTunnel
+                }
+            } elseif ($st.TunnelProc) {
+                if ($tailText -match ' Serve tunnel error|Retrying connection' -and $tailLines[-1] -notmatch 'Registered tunnel connection') {
+                    $st.TunnelState = "RECONNECTING"
+                } elseif ($st.PublicUrl) {
+                    $st.TunnelState = "ONLINE"
+                } else {
+                    $st.TunnelState = "STARTING"
+                }
+            } else {
+                $st.PublicUrl = $null
             }
         } elseif ($st.TunnelProc) {
-            if ($tailText -match ' Serve tunnel error|Retrying connection' -and $tailLines[-1] -notmatch 'Registered tunnel connection') {
-                $st.TunnelState = "RECONNECTING"
-            } elseif ($st.PublicUrl) {
-                $st.TunnelState = "ONLINE"
-            } else {
-                $st.TunnelState = "STARTING"
-            }
-        } else {
-            $st.PublicUrl = $null
+            $st.TunnelState = "STARTING"
         }
-    } elseif ($st.TunnelProc) {
-        $st.TunnelState = "STARTING"
     }
 
     if (Test-Path "$HomeDir\esc.log") {
@@ -718,42 +829,52 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
         )
     }
 
+    $tunLabel = switch ($st.TunnelMode) {
+        'tailscale' { " TS Funnel : " }
+        'named'     { " CF Named  : " }
+        default     { " CF Tunnel : " }
+    }
+    $tunExtra = switch ($st.TunnelMode) {
+        'tailscale' { "Permanent  ─►  " }
+        'named'     { "Permanent PID $($st.TunnelProc.Id)  ─►  " }
+        default     { "PID $($st.TunnelProc.Id)  ─►  " }
+    }
     switch ($st.TunnelState) {
         "ONLINE" {
             Write-BoxRow @(
-                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @($tunLabel, [ConsoleColor]::Gray),
                 @("[$pulseDot] ONLINE  ", [ConsoleColor]::Green),
-                @("PID $($st.TunnelProc.Id)  ─►  ", [ConsoleColor]::DarkCyan),
+                @($tunExtra, [ConsoleColor]::DarkCyan),
                 @($st.PublicUrl, [ConsoleColor]::Yellow)
             )
         }
         "HEALING" {
             Write-BoxRow @(
-                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @($tunLabel, [ConsoleColor]::Gray),
                 @("[!] HEALING ", [ConsoleColor]::Yellow),
                 @("Cloudflare expired old tunnel ('Tunnel not found') -> rotating now...", [ConsoleColor]::Yellow)
             )
         }
         "RECONNECTING" {
-            $u = if ($st.PublicUrl) { $st.PublicUrl } else { "reconnecting to Cloudflare edge..." }
+            $u = if ($st.PublicUrl) { $st.PublicUrl } else { "reconnecting to tunnel edge..." }
             Write-BoxRow @(
-                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @($tunLabel, [ConsoleColor]::Gray),
                 @("[!] RETRY   ", [ConsoleColor]::Yellow),
                 @("PID $($st.TunnelProc.Id) reconnecting  ─►  $u", [ConsoleColor]::DarkYellow)
             )
         }
         "STARTING" {
             Write-BoxRow @(
-                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @($tunLabel, [ConsoleColor]::Gray),
                 @("[·] STARTING", [ConsoleColor]::Cyan),
-                @(" PID $($st.TunnelProc.Id) negotiating quick tunnel URL...", [ConsoleColor]::Gray)
+                @(" Negotiating public tunnel connection...", [ConsoleColor]::Gray)
             )
         }
         default {
             Write-BoxRow @(
-                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @($tunLabel, [ConsoleColor]::Gray),
                 @("[○] OFFLINE ", [ConsoleColor]::Red),
-                @("(cloudflared quick tunnel is not running)", [ConsoleColor]::DarkGray)
+                @("(public tunnel is not running — press [1] or configure in [S])", [ConsoleColor]::DarkGray)
             )
         }
     }
@@ -1392,10 +1513,14 @@ function Draw-SettingsBox($st) {
         @("$($cfg.cleanup_h)h grace round", [ConsoleColor]::White)
     )
 
-    $fixedUrl = if ($st.ConfigUrl) { $st.ConfigUrl } else { "(quick tunnel)" }
+    $tunDesc = switch ($st.TunnelMode) {
+        'tailscale' { "Tailscale Funnel ($($st.ConfigUrl))" }
+        'named'     { "CF Named Token ($($st.ConfigUrl))" }
+        default     { if ($st.ConfigUrl) { $st.ConfigUrl } else { "Quick Tunnel (auto-heal)" } }
+    }
     Write-BoxSplitRow @(
-        @(" Fixed URL : ", [ConsoleColor]::Gray),
-        @($fixedUrl, [ConsoleColor]::DarkGray)
+        @(" Tunnel    : ", [ConsoleColor]::Gray),
+        @($tunDesc, [ConsoleColor]::Yellow)
     ) @(
         @(" Disk Guard: ", [ConsoleColor]::Gray),
         @("$($cfg.reserve_pct)% / $(Format-Bytes ([long]$cfg.reserve_min))", [ConsoleColor]::White)
@@ -1449,6 +1574,151 @@ function Draw-SettingsBox($st) {
     }
 }
 
+function Configure-PublicTunnel($st) {
+    Set-CursorHidden $false
+    Clear-ScreenSafe
+    Draw-AnimatedHeader -frame 0 -starName $st.StarName -online ($null -ne $st.RelayProc)
+    Write-BoxRow @(
+        @(" CONFIGURE PUBLIC HTTPS TUNNEL MODE", [ConsoleColor]::Cyan),
+        @(" — Permanent or Ephemeral Public URL", [ConsoleColor]::Gray)
+    )
+    Write-BoxDivider "─" DarkCyan
+    Write-BoxRow @(
+        @("   [1] ", [ConsoleColor]::Cyan),
+        @("Tailscale Funnel (Recommended — Permanent Free URL: https://<pc>.<tailnet>.ts.net)", [ConsoleColor]::Green)
+    )
+    Write-BoxRow @(
+        @("       Free, no custom domain needed, never changes or expires on sleep/network drops.", [ConsoleColor]::DarkGray)
+    )
+    Write-BoxRow @(
+        @("   [2] ", [ConsoleColor]::Cyan),
+        @("Cloudflare Named Tunnel Token (Permanent Custom Domain: https://esc.yourdomain.com)", [ConsoleColor]::Yellow)
+    )
+    Write-BoxRow @(
+        @("       Uses a permanent token from Cloudflare Zero Trust (requires your own domain).", [ConsoleColor]::DarkGray)
+    )
+    Write-BoxRow @(
+        @("   [3] ", [ConsoleColor]::Cyan),
+        @("Cloudflare Quick Tunnel (Default — Ephemeral *.trycloudflare.com + Auto-Heal)", [ConsoleColor]::White)
+    )
+    Write-BoxRow @(
+        @("       Zero account setup, but URL changes if the PC sleeps or internet drops.", [ConsoleColor]::DarkGray)
+    )
+    Write-BoxBottom DarkCyan
+
+    Write-Host "`n   Select tunnel mode [1/2/3, or Enter to cancel]: " -ForegroundColor Cyan -NoNewline
+    $choice = (Read-Host).Trim()
+    $port = ($st.ProdListen -split ':')[-1]
+
+    if ($choice -eq '1') {
+        $tsCmd = Get-TailscaleExe
+        if (-not $tsCmd) {
+            Write-Host "`n   Tailscale is not installed yet. Install now via winget? [Y/n]: " -ForegroundColor Yellow -NoNewline
+            $ans = (Read-Host).Trim()
+            if ($ans -eq '' -or $ans -match '^[Yy]') {
+                Write-Host "   Installing Tailscale..." -ForegroundColor Cyan
+                & winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
+                $tsCmd = Get-TailscaleExe
+            }
+        }
+        if (-not $tsCmd) {
+            Set-CursorHidden $true
+            Clear-ScreenSafe
+            return "Tailscale installation not found. Install from https://tailscale.com/download and retry."
+        }
+
+        Write-Host "   Checking Tailscale login & MagicDNS certificate status..." -ForegroundColor Cyan
+        $tsJson = (& $tsCmd status --json 2>$null) -join "`n"
+        if ($tsJson -match '"BackendState"\s*:\s*"NeedsLogin"') {
+            Write-Host "   Opening browser for Tailscale sign-in..." -ForegroundColor Yellow
+            & $tsCmd login
+            $tsJson = (& $tsCmd status --json 2>$null) -join "`n"
+        }
+
+        $dnsName = $null
+        if ($tsJson -match '"DNSName"\s*:\s*"([^"]+)\."') {
+            $dnsName = $Matches[1]
+        }
+        if (-not $dnsName) {
+            Write-Host "   Enter your machine's Tailscale domain (e.g. polaris.tail1234.ts.net): " -ForegroundColor Cyan -NoNewline
+            $dnsName = ((Read-Host).Trim() -replace '^https?://', '').TrimEnd('/')
+        }
+        if (-not $dnsName) {
+            Set-CursorHidden $true
+            Clear-ScreenSafe
+            return "Cancelled Tailscale Funnel setup."
+        }
+
+        $permUrl = "https://$dnsName"
+        Write-Host "   Enabling Tailscale Funnel on port $port -> $permUrl ..." -ForegroundColor Cyan
+        & $tsCmd funnel --bg $port
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "`n   [!] Note: If Tailscale printed an HTTPS/Funnel enable link above, open it once in your browser," -ForegroundColor Yellow
+            Write-Host "       click Enable Funnel, and press Enter here to retry: " -ForegroundColor Yellow -NoNewline
+            [void](Read-Host)
+            & $tsCmd funnel --bg $port
+        }
+
+        $script:TunnelMode  = "tailscale"
+        $script:TunnelToken = ""
+        [void](Update-RelayIni "url" $permUrl)
+        Save-PathsConfig
+        Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        [void](Start-ProdStar)
+        Set-CursorHidden $true
+        Clear-ScreenSafe
+        return "Tailscale Funnel enabled! Permanent URL: $permUrl"
+    } elseif ($choice -eq '2') {
+        Write-Host "`n   1. In Cloudflare Zero Trust -> Networks -> Tunnels, create a tunnel and copy its Token." -ForegroundColor Gray
+        Write-Host "   2. Point its Public Hostname (e.g. esc.yourdomain.com) to http://$($st.ProdListen)" -ForegroundColor Gray
+        Write-Host "`n   Paste Cloudflare Tunnel Token (eyJh...): " -ForegroundColor Cyan -NoNewline
+        $tok = (Read-Host).Trim()
+        # If user pasted 'cloudflared.exe service install eyJh...', extract just the token
+        if ($tok -match '([A-Za-z0-9_-]{40,}=*)') { $tok = $Matches[1] }
+        if (-not $tok) {
+            Set-CursorHidden $true
+            Clear-ScreenSafe
+            return "Cancelled (no token provided)."
+        }
+        Write-Host "   Enter your permanent Public HTTPS URL (e.g. https://esc.yourdomain.com): " -ForegroundColor Cyan -NoNewline
+        $customUrl = (Read-Host).Trim().TrimEnd('/')
+        if ($customUrl -and $customUrl -notmatch '^https?://') { $customUrl = "https://$customUrl" }
+        if (-not $customUrl) {
+            Set-CursorHidden $true
+            Clear-ScreenSafe
+            return "Cancelled (no public URL provided)."
+        }
+
+        $script:TunnelMode  = "named"
+        $script:TunnelToken = $tok
+        [void](Update-RelayIni "url" $customUrl)
+        Save-PathsConfig
+        Restart-ZombieTunnel
+        [void](Start-ProdStar)
+        Set-CursorHidden $true
+        Clear-ScreenSafe
+        return "Configured Named Cloudflare Tunnel for $customUrl!"
+    } elseif ($choice -eq '3') {
+        $tsCmd = Get-TailscaleExe
+        if ($tsCmd -and $script:TunnelMode -eq 'tailscale') {
+            & $tsCmd funnel --bg off *> $null
+        }
+        $script:TunnelMode  = "quick"
+        $script:TunnelToken = ""
+        [void](Update-RelayIni "url" "")
+        Save-PathsConfig
+        Restart-ZombieTunnel
+        [void](Start-ProdStar)
+        Set-CursorHidden $true
+        Clear-ScreenSafe
+        return "Switched to Cloudflare Quick Tunnel (*.trycloudflare.com with auto-heal)."
+    }
+
+    Set-CursorHidden $true
+    Clear-ScreenSafe
+    return "Tunnel configuration unchanged."
+}
+
 function Show-SettingsMenu {
     Clear-ScreenSafe
     $subSel = 0
@@ -1464,7 +1734,7 @@ function Show-SettingsMenu {
 
         $subItems = @(
             @{ Key = "1"; Label = "Change Star Name in relay.ini (currently: $($st.StarName))" },
-            @{ Key = "2"; Label = "Set / Clear Fixed Public URL in relay.ini (for custom Cloudflare domain)" },
+            @{ Key = "2"; Label = "Configure Public Tunnel Mode (Tailscale Funnel / Cloudflare Token / Quick)" },
             @{ Key = "3"; Label = "Rotate Cloudflare Quick Tunnel URL (restart cloudflared for a new URL)" },
             @{ Key = "4"; Label = $(if ($st.AutoStart) { "Disable Windows Boot Auto-Start (remove Task Scheduler tasks)" } else { "Enable Windows Boot Auto-Start (install Task Scheduler tasks)" }) },
             @{ Key = "5"; Label = "Create Snapshot Backup ($DataDir -> $BackupDir\*.zip)" },
@@ -1565,20 +1835,7 @@ function Show-SettingsMenu {
                 $st = Get-StarStatus
             }
             1 {
-                Set-CursorHidden $false
-                Write-Host "`n   Enter fixed public URL (or type CLEAR to use quick tunnel): " -ForegroundColor Cyan -NoNewline
-                $newUrl = (Read-Host).Trim()
-                Set-CursorHidden $true
-                Clear-ScreenSafe
-                if ($newUrl -eq 'CLEAR') {
-                    [void](Update-RelayIni "url" "")
-                    $subMsg = "Cleared fixed public URL in relay.ini."
-                } elseif ($newUrl) {
-                    [void](Update-RelayIni "url" $newUrl)
-                    $subMsg = "Set public URL to '$newUrl' in relay.ini (restart Star to apply)."
-                } else {
-                    $subMsg = "Cancelled."
-                }
+                $subMsg = Configure-PublicTunnel $st
                 $st = Get-StarStatus
             }
             2 {
