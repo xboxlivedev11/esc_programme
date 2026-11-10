@@ -464,33 +464,67 @@ function Get-EscLogState([string]$targetDataDir = $DataDir) {
     }
 }
 
+function Test-LocalRelay([string]$listenAddr) {
+    try {
+        $req = [System.Net.WebRequest]::Create("http://$listenAddr/api/info")
+        $req.Timeout = 1200
+        $resp = $req.GetResponse()
+        $code = [int]$resp.StatusCode
+        $resp.Close()
+        return ($code -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+function Restart-ZombieTunnel {
+    Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 250
+    Remove-Item "$HomeDir\tunnel.log" -Force -ErrorAction SilentlyContinue
+    cmd /c "schtasks /run /tn `"ESC Tunnel`" >nul 2>&1"
+    if ($LASTEXITCODE -ne 0 -and (Test-Path "$HomeDir\run-tunnel.ps1")) {
+        $hasRunner = $false
+        Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | ForEach-Object {
+            try {
+                $cl = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+                if ($cl -and $cl -like "*run-tunnel.ps1*") { $hasRunner = $true }
+            } catch {}
+        }
+        if (-not $hasRunner) {
+            Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$HomeDir\run-tunnel.ps1`"" -WindowStyle Hidden
+        }
+    }
+}
+
 function Get-StarStatus {
     $logState = Get-EscLogState $DataDir
     $st = [ordered]@{
-        StarName    = "Polaris"
-        StarId      = "-"
-        ProdListen  = $ProdListen
-        ConfigUrl   = ""
-        Seeds       = ""
-        RelayProc   = $null
-        RelayMemMB  = 0.0
-        TunnelProc  = $null
-        PublicUrl   = $null
-        AdminTicket = $null
-        Events      = $logState.EventCount
-        DevProc     = $null
-        DevMemMB    = 0.0
-        DevTicket   = $null
-        DiskFreeGB  = 0.0
-        DiskTotalGB = 1.0
-        DataSizeMB  = 0.0
-        BlobCount   = 0
-        UserCount   = $logState.Users.Count
-        ConvCount   = $logState.ConvCount
-        MsgCount    = $logState.MsgCount
-        LogState    = $logState
-        AutoStart   = $false
-        GitDirty    = 0
+        StarName     = "Polaris"
+        StarId       = "-"
+        ProdListen   = $ProdListen
+        ConfigUrl    = ""
+        Seeds        = ""
+        RelayProc    = $null
+        RelayHealthy = $false
+        RelayMemMB   = 0.0
+        TunnelProc   = $null
+        TunnelState  = "OFFLINE"
+        PublicUrl    = $null
+        AdminTicket  = $null
+        Events       = $logState.EventCount
+        DevProc      = $null
+        DevMemMB     = 0.0
+        DevTicket    = $null
+        DiskFreeGB   = 0.0
+        DiskTotalGB  = 1.0
+        DataSizeMB   = 0.0
+        BlobCount    = 0
+        UserCount    = $logState.Users.Count
+        ConvCount    = $logState.ConvCount
+        MsgCount     = $logState.MsgCount
+        LogState     = $logState
+        AutoStart    = $false
+        GitDirty     = 0
     }
 
     if (Test-Path "$DataDir\relay.ini") {
@@ -510,6 +544,7 @@ function Get-StarStatus {
     }
     if ($st.RelayProc) {
         $st.RelayMemMB = [math]::Round($st.RelayProc.WorkingSet64 / 1MB, 1)
+        $st.RelayHealthy = Test-LocalRelay $st.ProdListen
     }
 
     $st.DevProc = $allEsc | Where-Object { $_.Name -eq 'esc-dev' -or ($_.Path -and $_.Path -like "$DevDir*") } | Select-Object -First 1
@@ -522,6 +557,28 @@ function Get-StarStatus {
     if (Test-Path "$HomeDir\tunnel.log") {
         $m = Select-String -Path "$HomeDir\tunnel.log" -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 1
         if ($m) { $st.PublicUrl = $m.Matches[-1].Value }
+
+        $tailLines = @(Get-Content "$HomeDir\tunnel.log" -Tail 30 -ErrorAction SilentlyContinue)
+        $tailText = $tailLines -join "`n"
+        if ($tailText -match 'Unauthorized:\s*Tunnel not found') {
+            $st.TunnelState = "HEALING"
+            $st.PublicUrl = $null
+            if ($st.TunnelProc -or $st.RelayProc) {
+                Restart-ZombieTunnel
+            }
+        } elseif ($st.TunnelProc) {
+            if ($tailText -match ' Serve tunnel error|Retrying connection' -and $tailLines[-1] -notmatch 'Registered tunnel connection') {
+                $st.TunnelState = "RECONNECTING"
+            } elseif ($st.PublicUrl) {
+                $st.TunnelState = "ONLINE"
+            } else {
+                $st.TunnelState = "STARTING"
+            }
+        } else {
+            $st.PublicUrl = $null
+        }
+    } elseif ($st.TunnelProc) {
+        $st.TunnelState = "STARTING"
     }
 
     if (Test-Path "$HomeDir\esc.log") {
@@ -537,7 +594,7 @@ function Get-StarStatus {
         foreach ($l in $bootLines) {
             if ($l -match '#ticket=([A-Z0-9]+)') { $st.AdminTicket = $Matches[1] }
             if ($l -match 'public\s+(https://[a-z0-9-]+\.trycloudflare\.com)') {
-                if (-not $st.PublicUrl) { $st.PublicUrl = $Matches[1] }
+                if (-not $st.PublicUrl -and $st.TunnelProc -and $st.TunnelState -ne "HEALING") { $st.PublicUrl = $Matches[1] }
             }
         }
     }
@@ -639,13 +696,19 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
     Write-BoxSplitEnd DarkCyan
 
     # Live Services Section
-    if ($st.RelayProc) {
+    if ($st.RelayProc -and $st.RelayHealthy) {
         Write-BoxRow @(
             @(" Prod Star : ", [ConsoleColor]::Gray),
             @("[$pulseDot] RUNNING ", [ConsoleColor]::Green),
             @("PID $($st.RelayProc.Id) · $($st.RelayMemMB) MB RAM", [ConsoleColor]::White),
             @("  ─►  ", [ConsoleColor]::DarkCyan),
             @("http://$($st.ProdListen)", [ConsoleColor]::Cyan)
+        )
+    } elseif ($st.RelayProc) {
+        Write-BoxRow @(
+            @(" Prod Star : ", [ConsoleColor]::Gray),
+            @("[!] STALLED ", [ConsoleColor]::Yellow),
+            @("PID $($st.RelayProc.Id) is not responding on http://$($st.ProdListen)", [ConsoleColor]::Yellow)
         )
     } else {
         Write-BoxRow @(
@@ -655,21 +718,44 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
         )
     }
 
-    if ($st.TunnelProc) {
-        $urlText = if ($st.PublicUrl) { $st.PublicUrl } else { "negotiating Cloudflare quick tunnel..." }
-        $urlCol  = if ($st.PublicUrl) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkYellow }
-        Write-BoxRow @(
-            @(" CF Tunnel : ", [ConsoleColor]::Gray),
-            @("[$pulseDot] ONLINE  ", [ConsoleColor]::Green),
-            @("PID $($st.TunnelProc.Id)  ─►  ", [ConsoleColor]::DarkCyan),
-            @($urlText, $urlCol)
-        )
-    } else {
-        Write-BoxRow @(
-            @(" CF Tunnel : ", [ConsoleColor]::Gray),
-            @("[○] OFFLINE ", [ConsoleColor]::Red),
-            @("(cloudflared quick tunnel is not running)", [ConsoleColor]::DarkGray)
-        )
+    switch ($st.TunnelState) {
+        "ONLINE" {
+            Write-BoxRow @(
+                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @("[$pulseDot] ONLINE  ", [ConsoleColor]::Green),
+                @("PID $($st.TunnelProc.Id)  ─►  ", [ConsoleColor]::DarkCyan),
+                @($st.PublicUrl, [ConsoleColor]::Yellow)
+            )
+        }
+        "HEALING" {
+            Write-BoxRow @(
+                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @("[!] HEALING ", [ConsoleColor]::Yellow),
+                @("Cloudflare expired old tunnel ('Tunnel not found') -> rotating now...", [ConsoleColor]::Yellow)
+            )
+        }
+        "RECONNECTING" {
+            $u = if ($st.PublicUrl) { $st.PublicUrl } else { "reconnecting to Cloudflare edge..." }
+            Write-BoxRow @(
+                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @("[!] RETRY   ", [ConsoleColor]::Yellow),
+                @("PID $($st.TunnelProc.Id) reconnecting  ─►  $u", [ConsoleColor]::DarkYellow)
+            )
+        }
+        "STARTING" {
+            Write-BoxRow @(
+                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @("[·] STARTING", [ConsoleColor]::Cyan),
+                @(" PID $($st.TunnelProc.Id) negotiating quick tunnel URL...", [ConsoleColor]::Gray)
+            )
+        }
+        default {
+            Write-BoxRow @(
+                @(" CF Tunnel : ", [ConsoleColor]::Gray),
+                @("[○] OFFLINE ", [ConsoleColor]::Red),
+                @("(cloudflared quick tunnel is not running)", [ConsoleColor]::DarkGray)
+            )
+        }
     }
 
     if ($st.DevProc) {
@@ -902,9 +988,19 @@ while (`$true) {
     if (-not (Test-Path "$HomeDir\run-tunnel.ps1") -and (Test-Path $cfCmd)) {
         @"
 while (`$true) {
-  Remove-Item '$HomeDir\tunnel.log' -ErrorAction SilentlyContinue
-  & '$cfCmd' tunnel --no-autoupdate --url 'http://$ProdListen' --logfile '$HomeDir\tunnel.log' *> `$null
-  Start-Sleep -Seconds 5
+  Remove-Item '$HomeDir\tunnel.log' -Force -ErrorAction SilentlyContinue
+  `$p = Start-Process -FilePath '$cfCmd' -ArgumentList 'tunnel','--no-autoupdate','--url','http://$ProdListen','--logfile','$HomeDir\tunnel.log' -NoNewWindow -PassThru
+  while (-not `$p.HasExited) {
+    Start-Sleep -Seconds 5
+    if (Test-Path '$HomeDir\tunnel.log') {
+      `$tail = Get-Content '$HomeDir\tunnel.log' -Tail 25 -ErrorAction SilentlyContinue
+      if (`$tail -match 'Unauthorized:\s*Tunnel not found') {
+        Stop-Process -Id `$p.Id -Force -ErrorAction SilentlyContinue
+        break
+      }
+    }
+  }
+  Start-Sleep -Seconds 3
 }
 "@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
     }
@@ -960,7 +1056,7 @@ function Stop-ProdStar {
     foreach ($t in 'ESC Relay', 'ESC Tunnel') {
         cmd /c "schtasks /end /tn `"$t`" >nul 2>&1"
     }
-    Get-Process powershell -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | ForEach-Object {
         try {
             $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
             if ($cmdLine -and ($cmdLine -like "*run-relay.ps1*" -or $cmdLine -like "*run-tunnel.ps1*")) {
@@ -978,11 +1074,11 @@ function Stop-ProdStar {
 
 function Rotate-TunnelUrl {
     Write-Host "`n  Rotating Cloudflare Quick Tunnel URL (restarting cloudflared only)..." -ForegroundColor Cyan
-    Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Restart-ZombieTunnel
     for ($w = 0; $w -lt 12; $w++) {
         Start-Sleep -Seconds 1
         $s = Get-StarStatus
-        if ($s.TunnelProc -and $s.PublicUrl) {
+        if ($s.TunnelProc -and $s.PublicUrl -and $s.TunnelState -eq 'ONLINE') {
             return "New Tunnel URL: $($s.PublicUrl)"
         }
     }

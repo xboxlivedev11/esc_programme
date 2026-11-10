@@ -39,9 +39,19 @@ while (`$true) {
 "@ | Set-Content (Join-Path $Home_ 'run-relay.ps1') -Encoding utf8
 @"
 while (`$true) {
-  Remove-Item '$Home_\tunnel.log' -ErrorAction SilentlyContinue
-  & '$cloudflared' tunnel --no-autoupdate --url 'http://$Listen' --logfile '$Home_\tunnel.log' *> `$null
-  Start-Sleep -Seconds 5
+  Remove-Item '$Home_\tunnel.log' -Force -ErrorAction SilentlyContinue
+  `$p = Start-Process -FilePath '$cloudflared' -ArgumentList 'tunnel','--no-autoupdate','--url','http://$Listen','--logfile','$Home_\tunnel.log' -NoNewWindow -PassThru
+  while (-not `$p.HasExited) {
+    Start-Sleep -Seconds 5
+    if (Test-Path '$Home_\tunnel.log') {
+      `$tail = Get-Content '$Home_\tunnel.log' -Tail 25 -ErrorAction SilentlyContinue
+      if (`$tail -match 'Unauthorized:\s*Tunnel not found') {
+        Stop-Process -Id `$p.Id -Force -ErrorAction SilentlyContinue
+        break
+      }
+    }
+  }
+  Start-Sleep -Seconds 3
 }
 "@ | Set-Content (Join-Path $Home_ 'run-tunnel.ps1') -Encoding utf8
 Copy-Item (Join-Path $PSScriptRoot 'status.ps1') (Join-Path $Home_ 'status.ps1') -Force
