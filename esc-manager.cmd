@@ -64,6 +64,52 @@ function Get-CloudflaredExe {
     return $null
 }
 
+# The Windows service installed by cloudflared's .msi (named "Cloudflared"), or $null.
+function Get-CfServiceInfo {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='Cloudflared'" -ErrorAction SilentlyContinue
+    if (-not $svc) { return $null }
+    [pscustomobject]@{ State = $svc.State; Pid = [int]$svc.ProcessId; StartMode = $svc.StartMode }
+}
+
+# cloudflared processes that ESC itself launched. Never the Windows service's own process.
+function Get-EscCloudflared {
+    $svcPid = 0
+    $svc = Get-CfServiceInfo
+    if ($svc) { $svcPid = $svc.Pid }
+    @(Get-Process cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $svcPid })
+}
+
+# Stop the restart-loop wrapper(s) of the tunnel (run-tunnel.ps1), so an old copy can never relaunch a stale tunnel.
+function Stop-TunnelWrappers {
+    Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | ForEach-Object {
+        try {
+            $cl = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+            if ($cl -and $cl -like "*run-tunnel.ps1*") { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+        } catch {}
+    }
+}
+
+# Enable or disable the "ESC Tunnel" boot task (disabled in 'service' mode: the Windows service runs the tunnel).
+function Set-TunnelTask([bool]$on) {
+    $verb = if ($on) { '/enable' } else { '/disable' }
+    cmd /c "schtasks /change /tn `"ESC Tunnel`" $verb >nul 2>&1"
+}
+
+# Does the public host resolve in DNS? Cached 30 s; a slow lookup counts as "unknown" (true).
+$script:PubCheck = @{ At = [datetime]::MinValue; Host = ''; Dns = $true }
+function Test-PublicDns([string]$url) {
+    if (-not $url) { return $true }
+    try { $h = ([uri]$url).DnsSafeHost } catch { return $true }
+    if ($script:PubCheck.Host -eq $h -and ((Get-Date) - $script:PubCheck.At).TotalSeconds -lt 30) { return $script:PubCheck.Dns }
+    $ok = $false
+    try {
+        $t = [Net.Dns]::GetHostAddressesAsync($h)
+        if ($t.Wait(2000)) { $ok = ($t.Result.Count -gt 0) } else { $ok = $true }
+    } catch { $ok = $false }
+    $script:PubCheck = @{ At = Get-Date; Host = $h; Dns = $ok }
+    return $ok
+}
+
 function Write-TunnelRunner {
     New-Item -ItemType Directory -Force $HomeDir | Out-Null
     $port = ($ProdListen -split ':')[-1]
@@ -79,11 +125,21 @@ while (`$true) {
   Start-Sleep -Seconds 60
 }
 "@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
+    } elseif ($script:TunnelMode -eq 'service') {
+        @"
+# Tunnel mode 'service': the Windows service 'Cloudflared' (from cloudflared's .msi) carries the tunnel.
+# ESC never starts cloudflared in this mode, and the 'ESC Tunnel' task is disabled.
+exit
+"@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
     } elseif ($script:TunnelMode -eq 'named' -and $script:TunnelToken) {
+        # The token lives in a file only SYSTEM and Administrators can read, not on a command line.
+        $tokFile = Join-Path $HomeDir 'tunnel.token'
+        [IO.File]::WriteAllText($tokFile, $script:TunnelToken)
+        & icacls.exe $tokFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' *> $null
         @"
 while (`$true) {
   Remove-Item '$HomeDir\tunnel.log' -Force -ErrorAction SilentlyContinue
-  & '$cfCmd' tunnel --no-autoupdate --logfile '$HomeDir\tunnel.log' run --token '$($script:TunnelToken)' *> `$null
+  & '$cfCmd' tunnel --no-autoupdate --logfile '$HomeDir\tunnel.log' run --token-file '$tokFile' *> `$null
   Start-Sleep -Seconds 5
 }
 "@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
@@ -550,7 +606,13 @@ function Test-LocalRelay([string]$listenAddr) {
 }
 
 function Restart-ZombieTunnel {
-    Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    if ($script:TunnelMode -eq 'service') {
+        Restart-Service Cloudflared -ErrorAction SilentlyContinue
+        return
+    }
+    Get-EscCloudflared | Stop-Process -Force -ErrorAction SilentlyContinue
+    Stop-TunnelWrappers
+    Set-TunnelTask $true
     Start-Sleep -Milliseconds 250
     Remove-Item "$HomeDir\tunnel.log" -Force -ErrorAction SilentlyContinue
     cmd /c "schtasks /run /tn `"ESC Tunnel`" >nul 2>&1"
@@ -643,8 +705,13 @@ function Get-StarStatus {
         } elseif ($st.TunnelProc) {
             $st.TunnelState = "STARTING"
         }
+    } elseif ($script:TunnelMode -eq 'service') {
+        $svc = Get-CfServiceInfo
+        if ($svc -and $svc.Pid -gt 0) { $st.TunnelProc = Get-Process -Id $svc.Pid -ErrorAction SilentlyContinue }
+        if ($st.ConfigUrl) { $st.PublicUrl = $st.ConfigUrl }
+        $st.TunnelState = if (-not $svc) { "NO SERVICE" } elseif ($svc.State -eq 'Running') { "ONLINE" } else { "OFFLINE" }
     } elseif ($script:TunnelMode -eq 'named') {
-        $st.TunnelProc = Get-Process cloudflared -ErrorAction SilentlyContinue | Select-Object -First 1
+        $st.TunnelProc = Get-EscCloudflared | Select-Object -First 1
         if ($st.ConfigUrl) { $st.PublicUrl = $st.ConfigUrl }
         if ($st.TunnelProc) {
             if (Test-Path "$HomeDir\tunnel.log") {
@@ -662,7 +729,7 @@ function Get-StarStatus {
             }
         }
     } else {
-        $st.TunnelProc = Get-Process cloudflared -ErrorAction SilentlyContinue | Select-Object -First 1
+        $st.TunnelProc = Get-EscCloudflared | Select-Object -First 1
 
         if (Test-Path "$HomeDir\tunnel.log") {
             $m = Select-String -Path "$HomeDir\tunnel.log" -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 1
@@ -690,6 +757,11 @@ function Get-StarStatus {
         } elseif ($st.TunnelProc) {
             $st.TunnelState = "STARTING"
         }
+    }
+
+    # Connected to Cloudflare is not the same as reachable: without a DNS record the domain never reaches the tunnel.
+    if ($script:TunnelMode -in 'named', 'service' -and $st.TunnelState -eq 'ONLINE' -and -not (Test-PublicDns $st.PublicUrl)) {
+        $st.TunnelState = "NO DNS"
     }
 
     if (Test-Path "$HomeDir\esc.log") {
@@ -832,11 +904,13 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
     $tunLabel = switch ($st.TunnelMode) {
         'tailscale' { " TS Funnel : " }
         'named'     { " CF Named  : " }
+        'service'   { " CF Service: " }
         default     { " CF Tunnel : " }
     }
     $tunExtra = switch ($st.TunnelMode) {
         'tailscale' { "Permanent  ─►  " }
         'named'     { "Permanent PID $($st.TunnelProc.Id)  ─►  " }
+        'service'   { "Windows service PID $($st.TunnelProc.Id)  ─►  " }
         default     { "PID $($st.TunnelProc.Id)  ─►  " }
     }
     switch ($st.TunnelState) {
@@ -846,6 +920,20 @@ function Draw-Dashboard($st, [int]$selected, [string]$flashMsg, [int]$frame = 0,
                 @("[$pulseDot] ONLINE  ", [ConsoleColor]::Green),
                 @($tunExtra, [ConsoleColor]::DarkCyan),
                 @($st.PublicUrl, [ConsoleColor]::Yellow)
+            )
+        }
+        "NO DNS" {
+            Write-BoxRow @(
+                @($tunLabel, [ConsoleColor]::Gray),
+                @("[!] NO DNS  ", [ConsoleColor]::Yellow),
+                @("connected, but the domain has no DNS yet (set its nameservers to Cloudflare)", [ConsoleColor]::DarkYellow)
+            )
+        }
+        "NO SERVICE" {
+            Write-BoxRow @(
+                @($tunLabel, [ConsoleColor]::Gray),
+                @("[○] MISSING ", [ConsoleColor]::Red),
+                @("Windows service 'Cloudflared' not found (install the .msi, then [S] -> [4])", [ConsoleColor]::DarkGray)
             )
         }
         "HEALING" {
@@ -1143,7 +1231,16 @@ function Start-ProdStar {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1") -Home_ $HomeDir -Data $DataDir
         return "Production Star installed and started."
     }
-    $tunnelAlive = Get-Process cloudflared -ErrorAction SilentlyContinue
+    # 'service' mode: the Windows service owns the tunnel. Otherwise only cloudflared that ESC launched counts.
+    $tunnelAlive = ($script:TunnelMode -eq 'service') -or ((Get-EscCloudflared).Count -gt 0)
+    if ($script:TunnelMode -eq 'service') {
+        Set-TunnelTask $false
+        Remove-Item "$HomeDir\tunnel.log" -Force -ErrorAction SilentlyContinue
+        $cfs = Get-Service Cloudflared -ErrorAction SilentlyContinue
+        if ($cfs -and $cfs.Status -ne 'Running') { Start-Service Cloudflared -ErrorAction SilentlyContinue }
+    } else {
+        Set-TunnelTask $true
+    }
     cmd /c "schtasks /end /tn `"ESC Relay`" >nul 2>&1"
     Get-Process esc -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -like "$HomeDir*" } |
@@ -1185,11 +1282,13 @@ function Stop-ProdStar {
             }
         } catch {}
     }
-    Get-Process esc, cloudflared -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq 'cloudflared' -or $_.Path -like "$HomeDir*" } |
+    Get-EscCloudflared | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process esc -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like "$HomeDir*" } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
     Clear-ScreenSafe
+    if ($script:TunnelMode -eq 'service') { return "Production Star stopped. The Cloudflared Windows service keeps running." }
     return "Production Star & Tunnel stopped."
 }
 
@@ -1515,7 +1614,8 @@ function Draw-SettingsBox($st) {
 
     $tunDesc = switch ($st.TunnelMode) {
         'tailscale' { "Tailscale Funnel ($($st.ConfigUrl))" }
-        'named'     { "CF Named Token ($($st.ConfigUrl))" }
+        'named'     { "CF Named Token, run by ESC ($($st.ConfigUrl))" }
+        'service'   { "CF Named Tunnel, Windows service ($($st.ConfigUrl))" }
         default     { if ($st.ConfigUrl) { $st.ConfigUrl } else { "Quick Tunnel (auto-heal)" } }
     }
     Write-BoxSplitRow @(
@@ -1604,9 +1704,16 @@ function Configure-PublicTunnel($st) {
     Write-BoxRow @(
         @("       Zero account setup, but URL changes if the PC sleeps or internet drops.", [ConsoleColor]::DarkGray)
     )
+    Write-BoxRow @(
+        @("   [4] ", [ConsoleColor]::Cyan),
+        @("Cloudflare Named Tunnel run by the installed Windows service (cloudflared .msi)", [ConsoleColor]::Yellow)
+    )
+    Write-BoxRow @(
+        @("       Same permanent domain as [2]; the service carries it, ESC never launches cloudflared.", [ConsoleColor]::DarkGray)
+    )
     Write-BoxBottom DarkCyan
 
-    Write-Host "`n   Select tunnel mode [1/2/3, or Enter to cancel]: " -ForegroundColor Cyan -NoNewline
+    Write-Host "`n   Select tunnel mode [1/2/3/4, or Enter to cancel]: " -ForegroundColor Cyan -NoNewline
     $choice = (Read-Host).Trim()
     $port = ($st.ProdListen -split ':')[-1]
 
@@ -1663,7 +1770,8 @@ function Configure-PublicTunnel($st) {
         $script:TunnelToken = ""
         [void](Update-RelayIni "url" $permUrl)
         Save-PathsConfig
-        Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Get-EscCloudflared | Stop-Process -Force -ErrorAction SilentlyContinue
+        Stop-TunnelWrappers
         [void](Start-ProdStar)
         Set-CursorHidden $true
         Clear-ScreenSafe
@@ -1712,6 +1820,41 @@ function Configure-PublicTunnel($st) {
         Set-CursorHidden $true
         Clear-ScreenSafe
         return "Switched to Cloudflare Quick Tunnel (*.trycloudflare.com with auto-heal)."
+    } elseif ($choice -eq '4') {
+        $svc = Get-CfServiceInfo
+        if (-not $svc) {
+            Set-CursorHidden $true
+            Clear-ScreenSafe
+            return "Windows service 'Cloudflared' not found. Install the cloudflared .msi, then run: cloudflared service install <token>"
+        }
+        $cur = if ($st.ConfigUrl -and $st.ConfigUrl -notmatch 'trycloudflare|\.ts\.net') { $st.ConfigUrl } else { "" }
+        $hint = if ($cur) { " [Enter = $cur]" } else { "" }
+        Write-Host "`n   The service already holds the tunnel token; its Public Hostname must point to http://$($st.ProdListen)" -ForegroundColor Gray
+        Write-Host "   Enter your permanent Public HTTPS URL (e.g. https://esc.yourdomain.com)${hint}: " -ForegroundColor Cyan -NoNewline
+        $u = (Read-Host).Trim().TrimEnd('/')
+        if (-not $u) { $u = $cur }
+        if ($u -and $u -notmatch '^https?://') { $u = "https://$u" }
+        if (-not $u) {
+            Set-CursorHidden $true
+            Clear-ScreenSafe
+            return "Cancelled (no public URL provided)."
+        }
+        $tsCmd = Get-TailscaleExe
+        if ($tsCmd -and $script:TunnelMode -eq 'tailscale') { & $tsCmd funnel --bg off *> $null }
+        $script:TunnelMode  = "service"
+        $script:TunnelToken = ""
+        # Retire everything ESC itself used to run for the tunnel: task, wrapper loop, cloudflared, token file.
+        cmd /c "schtasks /end /tn `"ESC Tunnel`" >nul 2>&1"
+        Stop-TunnelWrappers
+        Get-EscCloudflared | Stop-Process -Force -ErrorAction SilentlyContinue
+        Set-TunnelTask $false
+        Remove-Item "$HomeDir\tunnel.log", "$HomeDir\tunnel.token" -Force -ErrorAction SilentlyContinue
+        [void](Update-RelayIni "url" $u)
+        Save-PathsConfig
+        [void](Start-ProdStar)
+        Set-CursorHidden $true
+        Clear-ScreenSafe
+        return "Tunnel now runs from the Cloudflared Windows service: $u"
     }
 
     Set-CursorHidden $true

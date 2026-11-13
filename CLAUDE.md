@@ -59,6 +59,21 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 
 ## Current state (newest first)
 
+### 2026-11-13: tunnel modes (service + named) and a deploy bug fixed
+
+- **`esc-paths.ini` `tunnel_mode`** is `quick` | `named` | `service` | `tailscale`. In `service` mode the Windows
+  service `Cloudflared` (the `.msi`) carries a named tunnel: ESC never starts `cloudflared`, the `ESC Tunnel` task is
+  disabled and `esc-manager.cmd` shows `CF Service`. In `named` mode ESC runs `cloudflared tunnel run --token-file`
+  (token in `D:\esc\tunnel.token`, SYSTEM + Administrators only). Switch in the manager: `[S]` then `[4]` (service) or `[2]` (named).
+- **Root cause of "0 requests on the named tunnel"**: `deploy\install.ps1` always rewrote `run-tunnel.ps1` as a quick-tunnel
+  wrapper and treated any `cloudflared` as its own. Now it reads `tunnel_mode`, only writes the quick wrapper in `quick`
+  mode, and ignores the service's process. The manager's restart, stop and "alive?" checks use `Get-EscCloudflared`
+  (ESC's own `cloudflared`, never the service's), and a restart also stops the old wrapper loop (`Stop-TunnelWrappers`).
+- **Dashboard** shows `NO DNS` when a named/service tunnel is connected but its domain does not resolve.
+- **Production domain**: `esc.admin.log.br` (tunnel connected) still needs `admin.log.br` nameservers at Cloudflare
+  (they were at Registro.br's `*.auto.dns.br`). Until then the quick tunnel is the only public route: do not switch to
+  `service` mode before the name resolves.
+
 ### 2026-11-09: Pictures, voice messages, pt-BR localization, themes & TUI manager live on Polaris
 
 - See `GEMINI.md` for full handover notes and current state.

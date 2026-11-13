@@ -28,7 +28,7 @@ app included) with **zero dependencies**, and every Star mirrors everything.
 | --- | --- |
 | `server/` | The relay: Rust 1.98, edition 2024, std only (no crates). `cargo test --release` runs 120+ unit tests and end-to-end tests that spawn real Stars |
 | `web/` | The web app: plain HTML/CSS/JS, no libraries, no build step; embedded into the binary |
-| `deploy/` | Run this box as Star Polaris behind a Cloudflare quick tunnel, at every boot |
+| `deploy/` | Run this box as Star Polaris at every boot, behind a Cloudflare tunnel (quick, named token, the `.msi` Windows service, or Tailscale: `esc-manager.cmd`, `[S]`) |
 | `docs/` | Design spec |
 
 ## Run it
