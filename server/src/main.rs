@@ -66,6 +66,16 @@ fn quick_tunnel_url(log: &str) -> Option<String> {
     found
 }
 
+/// The permanent public URL in relay.ini (`url = https://esc.example.com`), which esc-manager sets for a named,
+/// service or Tailscale tunnel. Quick-tunnel URLs are never read from here: they change on every restart and
+/// come from the tunnel log instead.
+fn configured_public_url(ini: &str) -> Option<String> {
+    ini.lines().find_map(|l| {
+        let v = l.trim_start_matches('\u{feff}').trim().strip_prefix("url")?.trim_start().strip_prefix('=')?.trim().trim_end_matches('/');
+        (v.starts_with("https://") && !v.contains(".trycloudflare.com")).then(|| v.to_string())
+    })
+}
+
 /// Follow cloudflared's log and announce each new public URL to the Ring (and print it).
 fn watch_tunnel(bridge: Arc<Bridge>, log: PathBuf) {
     let _ = thread::Builder::new().name("tunnel-watch".into()).spawn(move || {
@@ -139,6 +149,14 @@ fn serve(data: &Path, listen: Option<String>, web: Option<PathBuf>, tunnel_log: 
         }
     });
     esc::ring::start(bridge.clone());
+    if let Ok(text) = fs::read_to_string(data.join("relay.ini"))
+        && let Some(url) = configured_public_url(&text)
+    {
+        match bridge.announce_url(&url) {
+            Ok(()) => println!("  public  {url}"),
+            Err(e) => eprintln!("esc: could not announce {url}: {}", e.1),
+        }
+    }
     if let Some(log) = tunnel_log {
         watch_tunnel(bridge.clone(), log);
     }
@@ -225,6 +243,16 @@ fn join(data: &Path, args: &[String], url: Option<String>, name: Option<String>)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_the_permanent_url_from_relay_ini() {
+        let ini = "\u{feff}# ESC relay\nid = abc\nname = Polaris\nlisten = 127.0.0.1:7878\nurl = https://esc.admin.log.br/\n";
+        assert_eq!(super::configured_public_url(ini).as_deref(), Some("https://esc.admin.log.br"));
+        assert_eq!(super::configured_public_url("url =\n"), None, "empty");
+        assert_eq!(super::configured_public_url("url = http://plain.example\n"), None, "only https is public");
+        assert_eq!(super::configured_public_url("url = https://old-name.trycloudflare.com\n"), None, "quick URLs come from the tunnel log");
+        assert_eq!(super::configured_public_url("urlish = https://x.example\n"), None);
+    }
+
     #[test]
     fn finds_the_quick_tunnel_url() {
         let log = "2026-11-06T18:00:00Z INF Thank you for trying Cloudflare Tunnel. See https://developers.cloudflare.com/x\n\

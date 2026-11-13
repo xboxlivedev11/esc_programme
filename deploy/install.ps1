@@ -31,7 +31,9 @@ $ErrorActionPreference = 'Continue'
 # The Windows service 'Cloudflared' (cloudflared's .msi) is not ESC's: it never counts and is never touched.
 $svc = Get-CimInstance Win32_Service -Filter "Name='Cloudflared'" -ErrorAction SilentlyContinue
 $svcPid = if ($svc) { [int]$svc.ProcessId } else { 0 }
-$tunnelRunning = Get-Process cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $svcPid }
+$listenPort = ($Listen -split ':')[-1]
+$tunnelRunning = Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.ProcessId -ne $svcPid -and $_.CommandLine -and ($_.CommandLine -like "*$Home_*" -or $_.CommandLine -like "*:$listenPort*") }
 cmd /c "schtasks /end /tn `"ESC Relay`" >nul 2>&1"
 Get-Process esc -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Home_*" } | Stop-Process -Force
 if (-not $tunnelRunning) {

@@ -71,12 +71,16 @@ function Get-CfServiceInfo {
     [pscustomobject]@{ State = $svc.State; Pid = [int]$svc.ProcessId; StartMode = $svc.StartMode }
 }
 
-# cloudflared processes that ESC itself launched. Never the Windows service's own process.
+# cloudflared processes that ESC itself launched: their command line points at ESC's folder or relay port.
+# Never the Windows service's own process, and never someone else's tunnel (another project on this PC).
 function Get-EscCloudflared {
     $svcPid = 0
     $svc = Get-CfServiceInfo
     if ($svc) { $svcPid = $svc.Pid }
-    @(Get-Process cloudflared -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $svcPid })
+    $port = ($ProdListen -split ':')[-1]
+    @(Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessId -ne $svcPid -and $_.CommandLine -and ($_.CommandLine -like "*$HomeDir*" -or $_.CommandLine -like "*:$port*") } |
+        ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_ })
 }
 
 # Stop the restart-loop wrapper(s) of the tunnel (run-tunnel.ps1), so an old copy can never relaunch a stale tunnel.

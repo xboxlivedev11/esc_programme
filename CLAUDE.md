@@ -70,9 +70,14 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
   mode, and ignores the service's process. The manager's restart, stop and "alive?" checks use `Get-EscCloudflared`
   (ESC's own `cloudflared`, never the service's), and a restart also stops the old wrapper loop (`Stop-TunnelWrappers`).
 - **Dashboard** shows `NO DNS` when a named/service tunnel is connected but its domain does not resolve.
-- **Production domain**: `esc.admin.log.br` (tunnel connected) still needs `admin.log.br` nameservers at Cloudflare
-  (they were at Registro.br's `*.auto.dns.br`). Until then the quick tunnel is the only public route: do not switch to
-  `service` mode before the name resolves.
+- **Production is live on its own domain**: `https://esc.admin.log.br`, carried by the `Cloudflared` Windows service
+  (`tunnel_mode = service`; the `ESC Tunnel` task is disabled; no quick tunnel). The Cloudflare route must be
+  `http://127.0.0.1:7878` (plain HTTP): `https://` there gives a 502 because the relay does not speak TLS.
+  Tunnel `26fcd626-71c9-4839-8c06-aacc0b3cda5e`; the config is remote-managed (Zero Trust, or the API).
+- **`relay.ini` `url =`** (permanent `https://` only, never `trycloudflare`) is now announced to the Ring at startup;
+  before, only quick-tunnel URLs from the tunnel log were. `Get-EscCloudflared` only matches a `cloudflared` whose
+  command line points at ESC's folder or port, so other tunnels on this PC (e.g. `localhost:3000`) are never touched.
+- Secrets: never write Cloudflare API tokens or the tunnel token into the repo or docs.
 
 ### 2026-11-09: Pictures, voice messages, pt-BR localization, themes & TUI manager live on Polaris
 
