@@ -20,7 +20,11 @@ if (Test-Path $ini) {
 }
 $cloudflared = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
 if (-not $cloudflared) { $cloudflared = 'C:\Program Files (x86)\cloudflared\cloudflared.exe' }
-if ($mode -in 'quick', 'named' -and -not (Test-Path $cloudflared)) { throw "cloudflared missing: winget install --id Cloudflare.cloudflared -e" }
+if (($mode -in 'quick', 'named') -and -not (Test-Path $cloudflared)) {
+  # Not fatal: the relay still installs and runs locally; only the public tunnel is missing.
+  Write-Warning "cloudflared not found. The relay will start, but there is NO public tunnel until you run: winget install --id Cloudflare.cloudflared -e  (then press [1] again)"
+  $noCloudflared = $true
+}
 
 New-Item -ItemType Directory -Force $Home_, $Data | Out-Null
 # Windows PowerShell 5.1 turns any stderr of a native command into a fatal error under 'Stop':
@@ -44,6 +48,7 @@ Copy-Item $exe (Join-Path $Home_ 'esc.exe') -Force
 
 # Wrappers: restart on exit, append everything to a log (Task Scheduler has no console).
 @"
+Set-Content '$Home_\run-relay.pid' `$PID
 while (`$true) {
   # cmd's redirection keeps the log as plain UTF-8 bytes (Windows PowerShell 5.1 would re-encode it).
   cmd /c "`"$Home_\esc.exe`" serve --data `"$Data`" --listen $Listen --tunnel-log `"$Home_\tunnel.log`" >> `"$Home_\esc.log`" 2>&1"
@@ -76,8 +81,14 @@ foreach ($pair in @(@('ESC Relay', 'run-relay.ps1'), @('ESC Tunnel', 'run-tunnel
   $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Home_\$($pair[1])`""
   schtasks /create /tn $pair[0] /tr $cmd /sc onstart /ru SYSTEM /rl HIGHEST /f | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Could not create the '$($pair[0])' task (run this from an elevated PowerShell)." }
+  # schtasks defaults kill the task after 72 h, never restart it and stop it on battery: that silently
+  # took the relay and the tunnel down every 3 days. Run forever, restart on failure, ignore power state.
+  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 `
+    -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -MultipleInstances IgnoreNew
+  Set-ScheduledTask -TaskName $pair[0] -Settings $settings | Out-Null
   if ($pair[0] -eq 'ESC Tunnel') { schtasks /change /tn $pair[0] $(if ($mode -eq 'service') { '/disable' } else { '/enable' }) | Out-Null }
-  if ($pair[0] -eq 'ESC Relay' -or ($mode -ne 'service' -and -not $tunnelRunning)) {
+  if ($pair[0] -eq 'ESC Relay' -or ($mode -ne 'service' -and -not $tunnelRunning -and -not $noCloudflared)) {
     schtasks /run /tn $pair[0] | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Could not start the '$($pair[0])' task." }
   }

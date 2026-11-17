@@ -78,8 +78,12 @@ function Get-EscCloudflared {
     $svc = Get-CfServiceInfo
     if ($svc) { $svcPid = $svc.Pid }
     $port = ($ProdListen -split ':')[-1]
+    # The SYSTEM boot task owns the process, so a non-elevated manager cannot read its command line:
+    # the wrapper (run-tunnel.ps1) records cloudflared's PID in tunnel.pid, which is trusted too.
+    $pidFile = 0
+    try { $pidFile = [int](Get-Content (Join-Path $HomeDir 'tunnel.pid') -ErrorAction Stop | Select-Object -First 1) } catch {}
     @(Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.ProcessId -ne $svcPid -and $_.CommandLine -and ($_.CommandLine -like "*$HomeDir*" -or $_.CommandLine -like "*:$port*") } |
+        Where-Object { $_.ProcessId -ne $svcPid -and (($pidFile -and $_.ProcessId -eq $pidFile) -or ($_.CommandLine -and ($_.CommandLine -like "*$HomeDir*" -or $_.CommandLine -like "*:$port*"))) } |
         ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } | Where-Object { $_ })
 }
 
@@ -91,6 +95,16 @@ function Stop-TunnelWrappers {
             if ($cl -and $cl -like "*run-tunnel.ps1*") { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
         } catch {}
     }
+}
+
+# Is a restart-loop wrapper (run-relay / run-tunnel) already alive? Each wrapper writes its own PID to <name>.pid.
+# Needed because a non-elevated manager cannot read the command line of the SYSTEM-owned wrapper, and starting
+# a second copy made the loops fight over port 7878 and tunnel.log.
+function Test-WrapperAlive([string]$name) {
+    try {
+        $id = [int](Get-Content (Join-Path $HomeDir "$name.pid") -ErrorAction Stop | Select-Object -First 1)
+        return [bool](Get-Process -Id $id -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'powershell' })
+    } catch { return $false }
 }
 
 # Enable or disable the "ESC Tunnel" boot task (disabled in 'service' mode: the Windows service runs the tunnel).
@@ -141,9 +155,14 @@ exit
         [IO.File]::WriteAllText($tokFile, $script:TunnelToken)
         & icacls.exe $tokFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' *> $null
         @"
+Set-Content '$HomeDir\run-tunnel.pid' `$PID
 while (`$true) {
-  Remove-Item '$HomeDir\tunnel.log' -Force -ErrorAction SilentlyContinue
-  & '$cfCmd' tunnel --no-autoupdate --logfile '$HomeDir\tunnel.log' run --token-file '$tokFile' *> `$null
+  # Keep the log (rotated at 5 MB, never deleted) so a drop leaves evidence; http2 over TCP 7844 is steadier than QUIC on flaky links.
+  if ((Test-Path '$HomeDir\tunnel.log') -and (Get-Item '$HomeDir\tunnel.log').Length -gt 5MB) { Move-Item '$HomeDir\tunnel.log' '$HomeDir\tunnel.log.old' -Force -ErrorAction SilentlyContinue }
+  `$p = Start-Process -FilePath '$cfCmd' -ArgumentList 'tunnel','--no-autoupdate','--protocol','http2','--edge-ip-version','4','--logfile','$HomeDir\tunnel.log','run','--token-file','$tokFile' -NoNewWindow -PassThru
+  Set-Content '$HomeDir\tunnel.pid' `$p.Id
+  `$p.WaitForExit()
+  Add-Content '$HomeDir\tunnel-restarts.log' ("{0} cloudflared exited, code {1}" -f (Get-Date -Format s), `$p.ExitCode)
   Start-Sleep -Seconds 5
 }
 "@ | Set-Content (Join-Path $HomeDir 'run-tunnel.ps1') -Encoding utf8
@@ -628,7 +647,7 @@ function Restart-ZombieTunnel {
                 if ($cl -and $cl -like "*run-tunnel.ps1*") { $hasRunner = $true }
             } catch {}
         }
-        if (-not $hasRunner) {
+        if (-not $hasRunner -and -not (Test-WrapperAlive 'run-tunnel')) {
             Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$HomeDir\run-tunnel.ps1`"" -WindowStyle Hidden
         }
     }
@@ -1233,6 +1252,17 @@ function Start-ProdStar {
     if (-not (Test-Path "$HomeDir\esc.exe")) {
         Write-Host "  $HomeDir\esc.exe not found. Running deploy\install.ps1..." -ForegroundColor Yellow
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $DeployDir "install.ps1") -Home_ $HomeDir -Data $DataDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "`n  Install FAILED (exit $LASTEXITCODE). Read the message above (run the manager as Administrator; build first with 'cargo build --release' in server\). Press any key..." -ForegroundColor Red
+            [void][Console]::ReadKey($true)
+            Clear-ScreenSafe
+            return "Install failed: see the error above."
+        }
+        if (-not (Get-CloudflaredExe) -and $script:TunnelMode -in 'quick','named') {
+            Write-Host "`n  Relay started, but cloudflared is NOT installed, so there is no public tunnel. Run: winget install --id Cloudflare.cloudflared -e   then press [1] again. Press any key..." -ForegroundColor Yellow
+            [void][Console]::ReadKey($true)
+        }
+        Clear-ScreenSafe
         return "Production Star installed and started."
     }
     # 'service' mode: the Windows service owns the tunnel. Otherwise only cloudflared that ESC launched counts.
@@ -1253,13 +1283,13 @@ function Start-ProdStar {
 
     cmd /c "schtasks /run /tn `"ESC Relay`" >nul 2>&1"
     $startedRelay = ($LASTEXITCODE -eq 0)
-    if (-not $startedRelay -and (Test-Path "$HomeDir\run-relay.ps1")) {
+    if (-not $startedRelay -and (Test-Path "$HomeDir\run-relay.ps1") -and -not (Test-WrapperAlive 'run-relay')) {
         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$HomeDir\run-relay.ps1`"" -WindowStyle Hidden
     }
 
     if (-not $tunnelAlive) {
         cmd /c "schtasks /run /tn `"ESC Tunnel`" >nul 2>&1"
-        if ($LASTEXITCODE -ne 0 -and (Test-Path "$HomeDir\run-tunnel.ps1")) {
+        if ($LASTEXITCODE -ne 0 -and (Test-Path "$HomeDir\run-tunnel.ps1") -and -not (Test-WrapperAlive 'run-tunnel')) {
             Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$HomeDir\run-tunnel.ps1`"" -WindowStyle Hidden
         }
     }

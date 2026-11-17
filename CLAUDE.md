@@ -59,6 +59,24 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 
 ## Current state (newest first)
 
+### 2026-11-17: why the relay/tunnel "died by itself" (fixed)
+
+- **Root cause**: `schtasks /create /sc onstart` gives Windows defaults: `ExecutionTimeLimit` 72 h, no restart, stop on battery.
+  Both SYSTEM tasks were killed 72 h after boot/deploy (`LastTaskResult 267014` = 0x41306), and the restart loops died with them.
+  `install.ps1` now applies `New-ScheduledTaskSettingsSet` (no limit, restart every 1 min x999, ignore power); also applied to the live tasks.
+- **This box today**: ESC is in `C:\esc` / `C:\esc_data` (no `D:` drive), `tunnel_mode = named` with `C:\esc\tunnel.token`.
+- **Duplicate wrappers**: every manager restart left old `run-relay.ps1` / `run-tunnel.ps1` loops running (as the user, not SYSTEM);
+  they fought over port 7878 and deleted each other's `tunnel.log`. Cleaned up; the SYSTEM tasks are the only owners now.
+- **Flaky edge**: dials to Cloudflare's IPv6 edge (`2606:4700:a0::x:7844`) time out on this network, and QUIC to region2 fails.
+  The named wrapper now runs `--protocol http2 --edge-ip-version 4`, keeps `tunnel.log` (rotated at 5 MB) and appends
+  `tunnel-restarts.log` on every `cloudflared` exit. Check those two files first when the tunnel drops.
+- **Manager showed OFFLINE while the tunnel was fine**: a non-elevated manager cannot read the command line or path of
+  SYSTEM-owned processes, so `Get-EscCloudflared` matched nothing. The tunnel wrapper now writes `tunnel.pid` (cloudflared's
+  PID) and `run-tunnel.pid` / `run-relay.pid` (its own PID); `Get-EscCloudflared` trusts `tunnel.pid`.
+- **Duplicate wrappers**: the same limitation made the manager's `schtasks /run` fallback spawn a user-owned wrapper on every
+  restart. `Test-WrapperAlive` now guards those fallbacks. For stop/restart to really work, run the manager as admin.
+- **Still open**: Task Scheduler history is disabled (no event for a future kill).
+
 ### 2026-11-13: tunnel modes (service + named) and a deploy bug fixed
 
 - **`esc-paths.ini` `tunnel_mode`** is `quick` | `named` | `service` | `tailscale`. In `service` mode the Windows
