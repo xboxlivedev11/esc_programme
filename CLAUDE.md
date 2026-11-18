@@ -75,6 +75,12 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
   PID) and `run-tunnel.pid` / `run-relay.pid` (its own PID); `Get-EscCloudflared` trusts `tunnel.pid`.
 - **Duplicate wrappers**: the same limitation made the manager's `schtasks /run` fallback spawn a user-owned wrapper on every
   restart. `Test-WrapperAlive` now guards those fallbacks. For stop/restart to really work, run the manager as admin.
+- **Network was misconfigured by an old project ("uplink", never to run again)**: Ethernet had a static `192.168.18.5`
+  (`Duplicate`) on a network that is really `192.168.2.0/24`, so Windows said "no internet" and everything leaked out over
+  IPv6. Ethernet is back on DHCP. **Cloudflare WARP was uninstalled completely** (client, adapter, services, registry) at the
+  user's request; `cloudflared` (the ESC tunnel) is separate and stays. Windows Firewall is off on all profiles.
+- **Remote admin**: `deploy\remote-ssh.ps1` + `docs\remote-access.md` (OpenSSH Server over Tailscale, key-only, listens on the
+  Tailscale IP only). This PC is `haswell` / `100.83.19.74` in the tailnet.
 - **Still open**: Task Scheduler history is disabled (no event for a future kill).
 
 ### 2026-11-13: tunnel modes (service + named) and a deploy bug fixed
