@@ -29,4 +29,5 @@ pub mod mlkem;
 pub mod p256;
 pub mod model;
 pub mod ring;
+pub mod webpush;
 pub mod ws;
