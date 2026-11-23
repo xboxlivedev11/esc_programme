@@ -99,7 +99,7 @@ Endpoint safety (call): the relay POSTs to a URL the client supplies, so it acce
 Removal: logout, "devices" session end, account disable, or a 404/410 from the push service deletes the subscription.
 
 ### 5.4 Sending (relay)
-`Bridge` already knows when a message is applied. For each recipient account (never the author): skip if the sender is blocked or the account disabled (ESC has no mute), and per subscription skip if its own session has a live WebSocket (an open desktop must not silence a phone):
+`Bridge` already knows when a message is applied. For each recipient account (never the author): skip if the sender is blocked, the account disabled or the conversation muted (per-conversation mute is new work, plan Task 6B), and per subscription skip if its own session has a live, recently-proven WebSocket (exact presence, plan Task 6A; an open desktop must not silence a phone):
 the Switchboard already tracks sessions. Otherwise hand `(account, preview)` to the push desk
 thread. The desk coalesces per account for ~2 s, builds the envelope per subscription, and POSTs through `curl` with the
 payload on stdin (never on the command line, so it cannot appear in process lists). Bouncer rate limits apply. No payload

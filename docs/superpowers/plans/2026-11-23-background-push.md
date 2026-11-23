@@ -26,7 +26,7 @@
 
 1. A subscription endpoint pointing at the relay itself, a private IP, `localhost` or an IP literal (SSRF) is refused. (T6)
 2. A push-service `404`/`410` deletes the subscription; `429`/`5xx` retry with capped backoff, never forever. (T7)
-3. The author never gets a push for their own message; a blocked sender or a disabled account never triggers one; a session with a live WebSocket is skipped but the user's other devices are not. (T7)
+3. The author never gets a push for their own message; a blocked sender, a muted conversation or a disabled account never triggers one; a session with a live WebSocket is skipped but the user's other devices are not; a dead or stale socket never counts as online. (T6A, T6B, T7)
 4. Preview text is cut on a character boundary (emoji, accents), and a file-only or voice-only message gets a sensible preview. (T7)
 5. A garbled or undecryptable payload still shows a generic "New message" in the service worker (a silent push revokes the subscription). (T8)
 
@@ -134,6 +134,34 @@
 - [ ] **Step 4:** Run → pass; `cargo test --release` whole suite, clippy clean.
 - [ ] **Step 5:** Commit `Add push store, VAPID key and subscription routes`.
 
+### Task 6A: Presence you can trust (`bridge.rs` Switchboard)  *(added at the user's request, 2026-11-23)*
+
+The user: "when 'online' doesn't work well it is a pain; this info could be used for sync notifications and for showing to other users — I request more sensitive tests." Today `Switchboard::online()` only counts map entries, including sockets whose queue overflowed or that were killed but not yet removed, so a dead socket can count as online and silence a push. Presence must be exact.
+
+**Files:** Modify `server/src/bridge.rs` (Switchboard, Client), `server/src/gate.rs`/`ws.rs` (heartbeat/timeout wiring if missing); Create `server/tests/presence.rs`.
+
+**Interfaces:**
+- Produces on `Switchboard`: `session_online(&self, sess: &Hash) -> bool`, `account_online(&self, a: Aid) -> bool`, `online_accounts(&self) -> Vec<Aid>`, `sessions_online(&self, a: Aid) -> usize`; all count **only** clients with `alive == true` whose last proof of life (frame, pong or accepted connection) is within `LIVE_MS` (default 75 s, 2.5× the server ping period). `Client::touch(&self)` records proof of life; `Switchboard::reap(&self, now_ms: u64) -> usize` removes dead/stale clients (called by the existing housekeeping tick; also `online()` itself must not count dead ones).
+- A grace period for *showing* presence to others (not for push decisions): `Switchboard::visible_online(&self, a: Aid, now_ms: u64) -> bool` stays true for 10 s after the last client left, so a refresh or a tunnel blip does not flash "offline" to everyone. Push decisions use the exact `session_online`.
+
+- [ ] **Step 1 (RED), tests that must all exist and fail first** in `server/tests/presence.rs` (real sockets via the existing e2e helpers) and unit tests in `bridge.rs`:
+  `one_tab_online_then_offline_on_close`; `two_tabs_one_closes_still_online`; `two_sessions_are_independent_session_online` (phone vs desktop); `abrupt_tcp_drop_without_close_frame_goes_offline_within_live_ms` (use an injected clock, no sleeps); `client_with_full_queue_is_not_online`; `killed_client_is_not_online_before_reap`; `kick_session_and_logout_and_password_change_and_disabled_account_all_go_offline`; `reconnect_before_old_socket_removed_never_flashes_offline` (add new then remove old, assert online at every step); `remove_twice_and_remove_unknown_are_harmless`; `idle_but_pinging_client_stays_online_past_live_ms`; `silent_client_goes_stale_after_live_ms`; `ring_replicated_message_uses_local_presence_only` (a client connected to Star A does not make the account online on Star B); `visible_online_has_ten_second_grace_but_session_online_does not`; `stress_64_threads_connect_disconnect_reconnect_counts_return_to_zero` (no negative/leaked entries, `online() == 0` at the end, no deadlock: finishes under 10 s); `online_counts_match_after_every_operation` (a model-based check: random operations against a trivial reference model, 2 000 steps, fixed seed).
+- [ ] **Step 2:** Run → fail. **Step 3:** Implement liveness (`AtomicU64 last_seen`), `touch` on every inbound frame/pong, `reap`, the new queries, and wire the server ping/timeout if the WebSocket loop lacks it. **Step 4:** Whole suite + clippy → green. **Step 5:** Commit `Make presence exact: liveness, reaping, per-session and grace queries`.
+
+### Task 6B: Mute conversations (model, rpc, app)  *(added at the user's request, 2026-11-23: "mute functions are very good")*
+
+Per account and per conversation; effects: no background push, no sound/toast/system notification in the app; the unread badge still counts (mute is not hide).
+
+**Files:** Modify `server/src/model.rs` (state + `apply`), `server/src/bridge.rs` (rpc), `server/src/gate.rs` (rpc match), `web/app.js`, `web/i18n.js`; tests in `model.rs` and `server/tests/e2e.rs`.
+
+**Interfaces:**
+- Event `kind::MUTE` `{"a": <account>, "c": <conversation>, "u": <until ms epoch>}`: `u = 0` unmutes, `u = 18446744073709551615` is forever; replicated through the Ring and applied deterministically like `block` (last event in log order wins). State: `Account.muted: HashMap<u64, u64>` (conversation → until). `pub fn is_muted(&self, a: Aid, c: u64, now_ms: u64) -> bool` on `State`.
+- rpc `mute` `{c, u}` (the client sends a duration; the relay turns it into `until = now + duration` so clocks cannot lie); `me` view includes the caller's active mutes so every device shows them.
+- UI: conversation menu "Mute…" with 1 hour, 8 hours, 1 week, Until I turn it back on, and "Unmute"; a small muted icon in the list; pt-BR strings; in-app alerts and the service worker's notification path respect it.
+
+- [ ] **Step 1 (RED):** `mute_applies_and_expires`, `forever_and_unmute`, `mute_survives_restart_replay`, `mute_replicates_and_converges_on_two_stars_with_conflicting_events`, `mute_of_unknown_or_not_joined_conversation_is_refused`, `muted_conversation_still_counts_unread`, `desk_skips_muted_but_not_other_conversations` (added to Task 9's e2e), `expired_mute_pushes_again`.
+- [ ] **Step 2:** Run → fail. **Step 3:** Implement model, rpc, UI. **Step 4:** Suite + clippy green; check in Chrome (dev relay) that the menu mutes and the toast/sound stop. **Step 5:** Commit `Add per-conversation mute`.
+
 ### Task 7: The push desk and the Bridge hooks (`push.rs`, `bridge.rs`)
 
 **Files:** Modify `server/src/push.rs`, `server/src/bridge.rs`; Create `server/tests/push_e2e.rs`.
@@ -141,7 +169,7 @@
 **Interfaces:**
 - Consumes: `courier::request`, `webpush`, `Store`.
 - Produces: `pub struct Desk` with `Desk::start(store: Arc<Store>, relay_url: Arc<Mutex<String>>) -> Desk`, `Desk::notify(&self, a: Aid, skip_sess: &dyn Fn(&Hash) -> bool, n: Note)`; `pub struct Note { pub conv: u64, pub from_name: String, pub text: String, pub unread: u32, pub msg_id: String, pub ts: u64 }`; `pub fn preview(text: &str, has_files: bool, has_voice: bool) -> String` (≤120 chars, cut on a char boundary with `…`; files → "📎 file"/"📎 N files", voice → "🎤 voice message"; pt-BR is the phone's job, send English keys the service worker translates: `"[file]"`, `"[files:N]"`, `"[voice]"`); `Switchboard::session_online(&self, sess: &Hash) -> bool`.
-- Bridge hooks: after the local `kind::MSG` commit (the `tx.push` loop near `bridge.rs:1497-1514`) and in `remote_pushes` (`bridge.rs:2213`), call a private `fn push_wake(&self, st: &State, c: u64, from: Aid, j: &Json, recipients: impl Iterator<Item = Aid>)`: skip the author, skip if the recipient `blocked` the sender or is disabled (Review Focus 3), compute `unread` from the existing read-pointer logic, then `desk.notify`.
+- Bridge hooks: after the local `kind::MSG` commit (the `tx.push` loop near `bridge.rs:1497-1514`) and in `remote_pushes` (`bridge.rs:2213`), call a private `fn push_wake(&self, st: &State, c: u64, from: Aid, j: &Json, recipients: impl Iterator<Item = Aid>)`: skip the author, skip if the recipient `blocked` the sender, is disabled, or has the conversation muted (`State::is_muted`, Task 6B) (Review Focus 3); the per-session skip uses the exact `Switchboard::session_online` of Task 6A, compute `unread` from the existing read-pointer logic, then `desk.notify`.
 - Desk behaviour: per-account coalescing window 2 s (latest note wins per conversation); one envelope per subscription; JSON `{"c","f","t","n","i","ts"}`; headers `TTL: 86400`, `Urgency: high`, `Topic: <first 22 chars of b64url(sha256(conv id))>`, `Content-Encoding: aes128gcm`, `Authorization: vapid …` (exp = now+12 h); statuses: 2xx done, `404`/`410` → `store.remove(id)`, `429`/`5xx`/network → retry at 5 s, 30 s, 5 min then drop (Review Focus 2), `4xx` otherwise drop and log the code only.
 
 - [ ] **Step 1:** Unit tests: `preview_cuts_on_char_boundary_emoji_and_accents`, `preview_file_only_and_voice_only`, `coalesce_keeps_latest_per_conversation` (inject a fake clock/sender through a small `trait Sender`), `retry_schedule_is_capped`, `gone_status_removes_subscription`, `session_online_true_only_for_that_session`.

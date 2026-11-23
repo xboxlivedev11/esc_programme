@@ -10,6 +10,7 @@
 //! - `lobby`: the Lobby, the embedded web app
 //! - `ring`: the Ring, replication between Stars (relays)
 //! - `model`: the state every relay rebuilds from the Logbook
+//! - `keccak`, `aead`, `p256`, `mlkem`, `webpush`: hand-written crypto for background push (SHA-3, AES-GCM, P-256, ML-KEM)
 //! - `http`, `ws`, `json`, `crypto`, `ids`: the plumbing
 
 pub mod bridge;
@@ -20,6 +21,7 @@ pub mod hold;
 pub mod http;
 pub mod ids;
 pub mod json;
+pub mod keccak;
 pub mod lobby;
 pub mod logbook;
 pub mod model;

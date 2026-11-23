@@ -27,6 +27,7 @@ native binary with zero third-party code, and every relay holds a full copy of e
 | D13 | License and publication | GPL-3.0 (only, as the user asked); public on GitHub (2026-11-23), to make integration between Stars and contributors easier. | User |
 | D14 | Background push | Web Push with encrypted content; an inner ML-KEM-768 + AES-256-GCM layer inside RFC 8291, so a recording of today's traffic stays unreadable after P-256 falls. Burst of messages in one chat collapses to one notification (`Topic`). Design: `2026-11-23-background-push-design.md`. | User (content encrypted, PQ, collapse); Claude (inner layer shape) |
 | D15 | Post-quantum scope | Audit every public-key use; upgrade Windows OpenSSH on haswell to 10.x for `mlkem768x25519`; verify the cloudflared hop. | User |
+| D16 | Mute and presence | Per-conversation mute (1 h, 8 h, 1 week, until turned off) that silences push and in-app alerts but still counts unread; presence ("online") made exact with liveness, reaping, per-session queries and heavy tests, because push decisions and what other users see depend on it. | User (2026-11-23) |
 
 Anything marked "Claude" is a default you can overrule. Just say so.
 
