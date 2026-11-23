@@ -61,6 +61,7 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 - `upload_file` in the browser tool only accepts paths inside the project, so use `data/testfiles`.
 
 ## Current state (newest first)
+### 2026-11-23: two Stars on one tunnel (found while fixing a 502)- **`esc.admin.log.br` was load-balanced between two separate relays**: this box (RAPTORLAKE, `Cloudflared` service) and haswell  (its own `cloudflared`) both run connectors for the SAME tunnel `26fcd626-71c9-4839-8c06-aacc0b3cda5e`. Cloudflare sends each request to  one of them (≈93 % to this box, ≈7 % to haswell, by proximity), so visitors landed on different Stars with different data. The 502s came  from requests routed to this box while its relay was down (its boot tasks had vanished; fixed with `deployinstall.ps1`).- **How to tell which Star answered**: the `?v=` tag in `/` (this box eb419afc7281 on 2026-11-23, haswell 64ed231a524d).- **Decision (user, 2026-11-23): both boxes as ONE Ring** (this box joins haswell with `esc join`). Until the Ring is tested, this box's  `Cloudflared` service is **stopped and set to Manual** so the domain reaches only haswell. Put it back (`Set-Service Cloudflared -StartupType  Automatic; Start-Service Cloudflared`) only after the join works. Ring peers need distinct reachable URLs, not the shared domain.
 
 ### 2026-11-23: published on GitHub under GPL-3.0 (decision D13, by the user)
 
