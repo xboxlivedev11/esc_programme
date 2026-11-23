@@ -1,6 +1,6 @@
 # Background push notifications, with a post-quantum inner layer
 
-Status: **draft, awaiting the user's approval** (2026-11-23). Nothing in this document is built yet.
+Status: **approved by the user (2026-11-23)**, including the OpenSSH 10.x upgrade on haswell and collapsing a burst into one notification per conversation (`Topic`). Not built yet.
 Decisions marked *user* were made by the user; everything marked *call* is Claude's proposal and can be reversed.
 
 ## 1. Intent
@@ -94,11 +94,13 @@ Settings → "Notifications in the background" (extends the existing `prefs.noti
 4. `GET /api/push/key` returns the Star's VAPID public key. The VAPID private key is generated on first start and kept in
    `data/vapid` (file permissions as for `secret`). `sub` claim = the relay's public `https://` URL, never an e-mail.
 
+Endpoint safety (call): the relay POSTs to a URL the client supplies, so it accepts only `https://` hosts under the known push services (`.googleapis.com`, `.mozilla.com`, `.push.apple.com`, `.notify.windows.com`), never IP literals, `localhost`, other ports or userinfo (SSRF guard). A test-only env switch allows loopback.
+
 Removal: logout, "devices" session end, account disable, or a 404/410 from the push service deletes the subscription.
 
 ### 5.4 Sending (relay)
-`Bridge` already knows when a message is applied. For each recipient account: skip if muted/blocked, skip if the
-account has a live WebSocket (the Switchboard already tracks this), otherwise hand `(account, preview)` to the push desk
+`Bridge` already knows when a message is applied. For each recipient account (never the author): skip if the sender is blocked or the account disabled (ESC has no mute), and per subscription skip if its own session has a live WebSocket (an open desktop must not silence a phone):
+the Switchboard already tracks sessions. Otherwise hand `(account, preview)` to the push desk
 thread. The desk coalesces per account for ~2 s, builds the envelope per subscription, and POSTs through `curl` with the
 payload on stdin (never on the command line, so it cannot appear in process lists). Bouncer rate limits apply. No payload
 or endpoint is ever logged; failures log only a status code and a short subscription id.

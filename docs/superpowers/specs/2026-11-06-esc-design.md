@@ -25,6 +25,8 @@ native binary with zero third-party code, and every relay holds a full copy of e
 | D11 | Privacy | No presence, no "last seen", no typing indicators, no read or delivery receipts, no way to test whether an ID exists. | Claude (from the brief) |
 | D12 | Data folder | `D:\esc_data` on the dev box (D: has ~51 GB free, C: ~21 GB). | Claude |
 | D13 | License and publication | GPL-3.0 (only, as the user asked); public on GitHub (2026-11-23), to make integration between Stars and contributors easier. | User |
+| D14 | Background push | Web Push with encrypted content; an inner ML-KEM-768 + AES-256-GCM layer inside RFC 8291, so a recording of today's traffic stays unreadable after P-256 falls. Burst of messages in one chat collapses to one notification (`Topic`). Design: `2026-11-23-background-push-design.md`. | User (content encrypted, PQ, collapse); Claude (inner layer shape) |
+| D15 | Post-quantum scope | Audit every public-key use; upgrade Windows OpenSSH on haswell to 10.x for `mlkem768x25519`; verify the cloudflared hop. | User |
 
 Anything marked "Claude" is a default you can overrule. Just say so.
 
