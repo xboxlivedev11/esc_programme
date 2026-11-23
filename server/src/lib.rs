@@ -25,6 +25,7 @@ pub mod json;
 pub mod keccak;
 pub mod lobby;
 pub mod logbook;
+pub mod mlkem;
 pub mod p256;
 pub mod model;
 pub mod ring;
