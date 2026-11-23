@@ -6,3 +6,6 @@ data/
 .claude/worktrees/
 esc-paths.ini
 
+
+# SSH key for the haswell box: never commit
+ssh_priv_key/
