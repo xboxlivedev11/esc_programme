@@ -10,7 +10,7 @@ $repo = (git rev-parse --show-toplevel).Trim()
 Set-Location $repo
 $key  = Join-Path $repo 'ssh_priv_key\id_ed25519_haswell_ssh_key'
 $sshO = @('-i', $key, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes')
-$dir  = 'C:\Users\usuario\Desktop\esc_programme\esc_programme'
+$dir  = 'C:\Users\usuario\Desktop\esc_programme'
 
 git fetch haswell master
 if ($LASTEXITCODE) { throw 'fetch failed (is haswell online in Tailscale?)' }
