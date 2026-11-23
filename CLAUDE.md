@@ -59,6 +59,17 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 
 ## Current state (newest first)
 
+### 2026-11-23: syncing with the live box (haswell) over git + SSH
+
+- **Haswell is the source of truth for what runs**: repo at `C:\Users\usuario\Desktop\esc_programme\esc_programme`
+  (note the doubled folder), deployed to `C:\esc`, data in `C:\esc_data`, `tunnel_mode = named`. SSH user is `usuario`
+  (key in `ssh_priv_key/`, now gitignored; the box is `100.83.19.74` on Tailscale, default shell is `cmd`, no SFTP/scp).
+- **Sync = git over SSH**: remote `haswell` (local config, not committed: `uploadpack`/`receivepack` set to
+  `cd /d <repo> & git-upload-pack . & rem` because Windows `cmd` cannot parse git's single-quoted path, and
+  `core.sshCommand` pointing at the key). `deploy\sync-haswell.ps1` fetches + fast-forwards ours, pushes to haswell's
+  side branch `incoming` (it has `master` checked out) and fast-forwards its `master`. Deploying stays manual.
+- Re-create the remote on a fresh clone: see the script header and the two `git config` lines above.
+
 ### 2026-11-17: why the relay/tunnel "died by itself" (fixed)
 
 - **Root cause**: `schtasks /create /sc onstart` gives Windows defaults: `ExecutionTimeLimit` 72 h, no restart, stop on battery.
