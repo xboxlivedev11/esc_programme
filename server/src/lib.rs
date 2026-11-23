@@ -14,6 +14,7 @@
 //! - `http`, `ws`, `json`, `crypto`, `ids`: the plumbing
 
 pub mod bridge;
+pub mod aead;
 pub mod courier;
 pub mod crypto;
 pub mod gate;
