@@ -69,7 +69,7 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 ### 2026-11-23: syncing with the live box (haswell) over git + SSH
 
 - **Haswell is the source of truth for what runs**: repo at `C:\Users\usuario\Desktop\esc_programme\esc_programme`
-  (note the doubled folder), deployed to `C:\esc`, data in `C:\esc_data`, `tunnel_mode = named`. SSH user is `usuario`
+, deployed to `C:\esc`, data in `C:\esc_data`, `tunnel_mode = named`. SSH user is `usuario`
   (key in `ssh_priv_key/`, now gitignored; the box is `100.83.19.74` on Tailscale, default shell is `cmd`, no SFTP/scp).
 - **Sync = git over SSH**: remote `haswell` (local config, not committed: `uploadpack`/`receivepack` set to
   `cd /d <repo> & git-upload-pack . & rem` because Windows `cmd` cannot parse git's single-quoted path, and
