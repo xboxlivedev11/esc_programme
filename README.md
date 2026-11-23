@@ -59,3 +59,7 @@ powershell -ExecutionPolicy Bypass -File deploy\uninstall.ps1   # stop + remove 
    ```
 
    It copies the whole Ring and serves the same accounts, messages and files.
+
+## License
+
+ESC is free software under the **GNU General Public License v3.0** (see `LICENSE`). It contains no third-party code.

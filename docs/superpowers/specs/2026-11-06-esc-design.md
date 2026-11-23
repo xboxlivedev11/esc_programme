@@ -24,6 +24,7 @@ native binary with zero third-party code, and every relay holds a full copy of e
 | D10 | Passwords | Browser runs PBKDF2-SHA256 (600,000 rounds) with native WebCrypto; relay stores only HMAC(ring pepper, result). | Claude |
 | D11 | Privacy | No presence, no "last seen", no typing indicators, no read or delivery receipts, no way to test whether an ID exists. | Claude (from the brief) |
 | D12 | Data folder | `D:\esc_data` on the dev box (D: has ~51 GB free, C: ~21 GB). | Claude |
+| D13 | License and publication | GPL-3.0 (only, as the user asked); public on GitHub (2026-11-23), to make integration between Stars and contributors easier. | User |
 
 Anything marked "Claude" is a default you can overrule. Just say so.
 

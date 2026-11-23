@@ -59,6 +59,13 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 
 ## Current state (newest first)
 
+### 2026-11-23: published on GitHub under GPL-3.0 (decision D13, by the user)
+
+- Public repo, `LICENSE` = GPL-3.0 text, README has a license section. History was scanned first (no tokens, keys or
+  credential files ever committed; authors are the GitHub noreply address). **Never commit** `ssh_priv_key/`,
+  `esc-paths.ini`, `tunnel.token`, `data/` or any Cloudflare/GitHub token: the repo is public now.
+- Remotes: `origin` = GitHub, `haswell` = the live box (see the sync entry below).
+
 ### 2026-11-23: syncing with the live box (haswell) over git + SSH
 
 - **Haswell is the source of truth for what runs**: repo at `C:\Users\usuario\Desktop\esc_programme\esc_programme`
