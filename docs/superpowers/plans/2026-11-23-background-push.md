@@ -162,6 +162,15 @@ Per account and per conversation; effects: no background push, no sound/toast/sy
 - [ ] **Step 1 (RED):** `mute_applies_and_expires`, `forever_and_unmute`, `mute_survives_restart_replay`, `mute_replicates_and_converges_on_two_stars_with_conflicting_events`, `mute_of_unknown_or_not_joined_conversation_is_refused`, `muted_conversation_still_counts_unread`, `desk_skips_muted_but_not_other_conversations` (added to Task 9's e2e), `expired_mute_pushes_again`.
 - [ ] **Step 2:** Run → fail. **Step 3:** Implement model, rpc, UI. **Step 4:** Suite + clippy green; check in Chrome (dev relay) that the menu mutes and the toast/sound stop. **Step 5:** Commit `Add per-conversation mute`.
 
+### Task 6C: Language and display choices follow the account; login "null" fixed  *(added at the user's request, 2026-11-23; DONE)*
+
+The user: "add the language selection as a user account setting so every login loads preferences; there is a 'null' in the login screen; the ultimate target is limitless efficiency and performance".
+
+- **The "null":** `box.replaceChildren(offlineNote, …)` in `welcome()` received `null` when the relay was reachable, and the DOM prints a null argument as the word "null". Fixed by filtering falsy children (`web/app.js`). The `h()` helper already skips null; raw `replaceChildren`/`append` with possibly-null arguments is the trap (CLAUDE.md gotcha).
+- **Account preferences:** `Account.prefs: Prefs { lang, theme, sound, sound_open }` (model.rs), carried by the existing `ACCOUNT_SET` event as `"pf":{"l","t","s","o"}`, replicated through the Ring, replayed from the Logbook. `me_set` validates (`LANGS`, `THEMES`, booleans; unknown keys ignored) and records **only what changed** (an unchanged save writes nothing). The account view carries `pf` only when something was chosen. Per-device choices (notification permission) are deliberately not synced.
+- **App:** at login the account's choices win and refresh `localStorage` (one reload when the effective language changes); live pushes from another device apply theme and sounds at once; a new account with nothing saved is seeded once from this browser's explicit language/theme; each settings control saves with `savePf`.
+- **Tests:** `bridge::tests::account_preferences_load_at_login_validate_and_survive_restart`, `model::tests::account_prefs_ignore_values_this_build_does_not_know` (mutation-checked); browser-verified on a dev relay: new device (storage wiped) logs in and gets Português + dark.
+
 ### Task 7: The push desk and the Bridge hooks (`push.rs`, `bridge.rs`)
 
 **Files:** Modify `server/src/push.rs`, `server/src/bridge.rs`; Create `server/tests/push_e2e.rs`.

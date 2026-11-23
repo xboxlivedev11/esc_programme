@@ -333,8 +333,29 @@ pub struct FileRef {
     pub convs: Vec<u64>,
 }
 
+/// Languages and themes an account may save. `auto` means "follow the browser".
+pub const LANGS: [&str; 3] = ["auto", "pt", "en"];
+pub const THEMES: [&str; 3] = ["auto", "light", "dark"];
+
+/// Display preferences that follow the account to every device and Star. Empty/`None` means "never chosen":
+/// the app then keeps what the browser decided. Per-device things (notification permission) are not here.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prefs {
+    pub lang: String,
+    pub theme: String,
+    pub sound: Option<bool>,
+    pub sound_open: Option<bool>,
+}
+
+impl Prefs {
+    pub fn is_empty(&self) -> bool {
+        self.lang.is_empty() && self.theme.is_empty() && self.sound.is_none() && self.sound_open.is_none()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Account {
+    pub prefs: Prefs,
     pub id: Aid,
     pub created: u64,
     pub origin: u64,
@@ -805,6 +826,7 @@ impl State {
                 disabled: false,
                 accept: true,
                 auto_recycle: true,
+                prefs: Prefs::default(),
                 quota: None,
                 recovery: Recovery::None,
                 cleanup_at: None,
@@ -839,6 +861,21 @@ impl State {
         }
         if let Some(v) = j.b("ar") {
             acc.auto_recycle = v;
+        }
+        if let Some(p) = j.get("pf") {
+            // Events may come from other Stars: apply only values this build understands.
+            if let Some(l) = p.s("l").filter(|l| LANGS.contains(l)) {
+                acc.prefs.lang = l.to_string();
+            }
+            if let Some(t) = p.s("t").filter(|t| THEMES.contains(t)) {
+                acc.prefs.theme = t.to_string();
+            }
+            if let Some(v) = p.b("s") {
+                acc.prefs.sound = Some(v);
+            }
+            if let Some(v) = p.b("o") {
+                acc.prefs.sound_open = Some(v);
+            }
         }
         if let Some(q) = j.get("q") {
             acc.quota = q.as_u64();
@@ -1350,6 +1387,17 @@ mod tests {
 
     fn h(n: u8) -> String {
         hex(&[n; 32])
+    }
+
+    #[test]
+    fn account_prefs_ignore_values_this_build_does_not_know() {
+        let mut t = T::new();
+        t.account("BBBB");
+        // a newer Star may send a language or theme this build lacks: keep what we have, apply what we understand
+        t.ev(2, kind::ACCOUNT_SET, r#"{"a":"BBBB","pf":{"l":"pt","t":"dark","s":false}}"#);
+        t.ev(3, kind::ACCOUNT_SET, r#"{"a":"BBBB","pf":{"l":"klingon","t":"neon","s":"yes","o":true}}"#);
+        let p = &t.acc("BBBB").prefs;
+        assert_eq!((p.lang.as_str(), p.theme.as_str(), p.sound, p.sound_open), ("pt", "dark", Some(false), Some(true)));
     }
 
     #[test]

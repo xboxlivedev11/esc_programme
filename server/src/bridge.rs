@@ -24,7 +24,7 @@ use crate::ids::{Aid, id64, new_id64, now_ms, parse_id64};
 use crate::json::{self, Js, Json};
 use crate::logbook::{self, Log};
 use crate::model::{
-    Account, Conv, Ev, FState, FileMeta, Hash, MState, MsgRef, Outcome, Recovery, Role, SETTING_KEYS, Signup, State, kind,
+    Account, Conv, Ev, FState, FileMeta, Hash, LANGS, MState, MsgRef, Outcome, Recovery, Role, SETTING_KEYS, Signup, State, THEMES, kind,
 };
 
 pub const MAX_TEXT: usize = 16_000;
@@ -548,6 +548,23 @@ impl Bridge {
             .ku("pin", a.pinned)
             .ku("fx", st.settings.flex_pct)
             .kos("pic", pic_tag(a.pic).as_deref());
+        if !a.prefs.is_empty() {
+            // Only what the account chose; the app keeps its own default for the rest.
+            js.key("pf").obj();
+            if !a.prefs.lang.is_empty() {
+                js.ks("l", &a.prefs.lang);
+            }
+            if !a.prefs.theme.is_empty() {
+                js.ks("t", &a.prefs.theme);
+            }
+            if let Some(v) = a.prefs.sound {
+                js.kb("s", v);
+            }
+            if let Some(v) = a.prefs.sound_open {
+                js.kb("o", v);
+            }
+            js.end_obj();
+        }
         js.key("cl");
         match a.cleanup_at {
             Some(t) => js.uint(t),
@@ -766,6 +783,43 @@ impl Bridge {
         if let Some(v) = j.b("acc") {
             e.kb("acc", v);
             any = true;
+        }
+        if let Some(p) = j.get("pf") {
+            // Display preferences that follow the account. Validate everything first, record only what changed.
+            if !matches!(p, Json::Obj(_)) {
+                return Err(bad("pf must be an object"));
+            }
+            let mut pf = Js::new();
+            pf.obj();
+            let mut changed = false;
+            if let Some(v) = p.get("l") {
+                let l = v.as_str().filter(|l| LANGS.contains(l)).ok_or_else(|| bad("unknown language"))?;
+                if l != acc.prefs.lang {
+                    pf.ks("l", l);
+                    changed = true;
+                }
+            }
+            if let Some(v) = p.get("t") {
+                let t = v.as_str().filter(|t| THEMES.contains(t)).ok_or_else(|| bad("unknown theme"))?;
+                if t != acc.prefs.theme {
+                    pf.ks("t", t);
+                    changed = true;
+                }
+            }
+            for (k, cur) in [("s", acc.prefs.sound), ("o", acc.prefs.sound_open)] {
+                if let Some(v) = p.get(k) {
+                    let b = v.as_bool().ok_or_else(|| bad("sound choices are true or false"))?;
+                    if cur != Some(b) {
+                        pf.kb(k, b);
+                        changed = true;
+                    }
+                }
+            }
+            pf.end_obj();
+            if changed {
+                e.key("pf").raw(&pf.finish());
+                any = true;
+            }
         }
         if let Some(v) = j.b("ar")
             && v != acc.auto_recycle
@@ -2418,6 +2472,49 @@ mod tests {
         let admin = bridge.st.lock().unwrap().accounts.values().find(|a| a.admin).map(|a| a.id);
         let a = admin.unwrap();
         bridge.admin_set(a, &parse(r#"{"set":{"signup":"open"}}"#).unwrap()).unwrap();
+    }
+
+    /// The `pf` object of the account's own view, as the app receives it at login.
+    fn pf_of(bridge: &Bridge, a: Aid) -> Option<Json> {
+        let hello = parse(&bridge.hello(a).unwrap()).unwrap();
+        hello.get("me").and_then(|m| m.get("pf")).cloned()
+    }
+
+    #[test]
+    fn account_preferences_load_at_login_validate_and_survive_restart() {
+        let dir = tmp("prefs");
+        let o = Bridge::open(&dir, None).unwrap();
+        let a = signup(&o.bridge, &o.admin_invite.clone().unwrap());
+        // nothing chosen yet: the app keeps whatever the browser decided
+        assert!(pf_of(&o.bridge, a).is_none());
+        // language and theme are saved with the account
+        o.bridge.me_set(a, &parse(r#"{"pf":{"l":"pt","t":"dark"}}"#).unwrap()).unwrap();
+        let pf = pf_of(&o.bridge, a).unwrap();
+        assert_eq!((pf.s("l"), pf.s("t")), (Some("pt"), Some("dark")));
+        assert!(pf.get("s").is_none() && pf.get("o").is_none(), "unset sound choices stay unset");
+        // a partial update keeps the rest
+        o.bridge.me_set(a, &parse(r#"{"pf":{"s":false,"o":true}}"#).unwrap()).unwrap();
+        let pf = pf_of(&o.bridge, a).unwrap();
+        assert_eq!((pf.s("l"), pf.s("t"), pf.b("s"), pf.b("o")), (Some("pt"), Some("dark"), Some(false), Some(true)));
+        // bad values are refused and change nothing
+        for bad in [r#"{"pf":{"l":"klingon"}}"#, r#"{"pf":{"t":"neon"}}"#, r#"{"pf":{"s":"yes"}}"#, r#"{"pf":"pt"}"#, r#"{"pf":{"l":7}}"#] {
+            assert!(o.bridge.me_set(a, &parse(bad).unwrap()).is_err(), "{bad}");
+        }
+        assert_eq!(pf_of(&o.bridge, a).unwrap().s("l"), Some("pt"));
+        // unknown keys are ignored, and saving the same values again writes nothing new
+        let log = dir.join("log").join(format!("{}.log", id64(o.bridge.me)));
+        let before = fs::metadata(&log).unwrap().len();
+        o.bridge.me_set(a, &parse(r#"{"pf":{"l":"pt","t":"dark","zzz":1}}"#).unwrap()).unwrap();
+        assert_eq!(fs::metadata(&log).unwrap().len(), before, "an unchanged choice must not grow the Logbook");
+        o.bridge.me_set(a, &parse(r#"{"pf":{"t":"light"}}"#).unwrap()).unwrap();
+        assert!(fs::metadata(&log).unwrap().len() > before, "a changed choice is recorded");
+        o.bridge.me_set(a, &parse(r#"{"pf":{"t":"dark"}}"#).unwrap()).unwrap();
+        // a restart replays the choice, so the next login on any device gets it
+        drop(o);
+        let o2 = Bridge::open(&dir, None).unwrap();
+        let pf = pf_of(&o2.bridge, a).unwrap();
+        assert_eq!((pf.s("l"), pf.s("t"), pf.b("s"), pf.b("o")), (Some("pt"), Some("dark"), Some(false), Some(true)));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -383,9 +383,47 @@ async function api(path, body, method = 'POST') {
   return j;
 }
 
+// Display choices that follow the account to every device and Star: language, theme, the two sound switches.
+// (Notification permission is per device, so it is not here.) `pf` keys on the wire are short: l, t, s, o.
+const PF = { l: 'lang', t: 'theme', s: 'sound', o: 'soundOpen' };
+
+/** Save changed choices with the account. Fire and forget: the local choice already took effect. */
+function savePf(change) {
+  const pf = {};
+  for (const [k, key] of Object.entries(PF)) if (key in change) pf[k] = change[key];
+  return S.me ? rpc('me_set', { pf }).catch(() => {}) : Promise.resolve();
+}
+
+/**
+ * Take the account's choices as the truth (they win over this browser's), at login and whenever another device
+ * changes them. Returns true when the language changed and the page must reload to show it. A new account
+ * with nothing saved yet is seeded once from this browser's explicit choices, so its other devices follow.
+ */
+function applyPf(pf, live = false) {
+  if (!pf) {
+    if (live) return false; // a push never seeds; only the login does
+    const seed = {};
+    if (prefs.lang !== 'auto') seed.lang = prefs.lang;
+    if (prefs.theme !== 'auto') seed.theme = prefs.theme;
+    if (Object.keys(seed).length) savePf(seed);
+    return false;
+  }
+  const before = pickLang();
+  let themed = false;
+  for (const [k, key] of Object.entries(PF)) {
+    if (!(k in pf) || prefs[key] === pf[k]) continue;
+    prefs[key] = pf[k];
+    if (key === 'theme') themed = true;
+  }
+  savePrefs();
+  if (themed) applyTheme();
+  return pickLang() !== before;
+}
+
 async function hello() {
   const res = await rpc('hello');
   S.me = res.me;
+  if (applyPf(S.me.pf)) return location.reload(); // another language: reload once; it matches next time
   S.rin = res.rin;
   S.rout = res.rout;
   S.relays = res.relays;
@@ -451,6 +489,7 @@ function onPush(m) {
       break;
     case 'me':
       S.me = m.me;
+      applyPf(m.me.pf, true); // theme and sounds follow another device at once; a new language waits for the next load
       notePics();
       break;
     case 'files':
@@ -2682,6 +2721,7 @@ function settingsView(pane) {
   const soundRow = toggleRow(t('Sound alerts'), t('A chime for new messages and a knock-knock for knocks and invites.'), prefs.sound, (on) => {
     prefs.sound = on;
     savePrefs();
+    savePf({ sound: on });
     if (on) {
       unlockAudio();
       chime('msg');
@@ -2690,6 +2730,7 @@ function settingsView(pane) {
   const soundOpenRow = toggleRow(t('Sounds in the open conversation'), t('A short tone when a message arrives in the Line or Crew on your screen.'), prefs.soundOpen, (on) => {
     prefs.soundOpen = on;
     savePrefs();
+    savePf({ soundOpen: on });
     if (on) {
       unlockAudio();
       chime('open');
@@ -2798,7 +2839,7 @@ function settingsView(pane) {
     ),
     section(
       t('Look and language'),
-      h('div', { class: 'kv wrap' }, h('b', null, t('Theme')), segmented(t('Theme'), [['auto', t('Automatic')], ['light', t('Light')], ['dark', t('Dark')]], prefs.theme, (v) => ((prefs.theme = v), savePrefs(), applyTheme(), paint()))),
+      h('div', { class: 'kv wrap' }, h('b', null, t('Theme')), segmented(t('Theme'), [['auto', t('Automatic')], ['light', t('Light')], ['dark', t('Dark')]], prefs.theme, (v) => ((prefs.theme = v), savePrefs(), savePf({ theme: v }), applyTheme(), paint()))),
       h(
         'div',
         { class: 'kv wrap' },
@@ -2806,7 +2847,7 @@ function settingsView(pane) {
         segmented(t('Language'), [['auto', t('Like the browser')], ['pt', 'Português'], ['en', 'English']], prefs.lang, (v) => {
           prefs.lang = v;
           savePrefs();
-          location.reload();
+          savePf({ lang: v }).then(() => location.reload()); // wait for the save, or the reload cancels it
         }),
       ),
     ),
@@ -3187,7 +3228,8 @@ async function welcome() {
   }
   function paintWelcome() {
     paintSeg();
-    box.replaceChildren(offlineNote, seg, mode === 'signin' ? signIn() : mode === 'create' ? create() : mode === 'reset' ? resetByLink() : lostPassword());
+    // Not offline: `offlineNote` is null, and replaceChildren(null) would print the word "null" on the screen.
+    box.replaceChildren(...[offlineNote, seg, mode === 'signin' ? signIn() : mode === 'create' ? create() : mode === 'reset' ? resetByLink() : lostPassword()].filter(Boolean));
   }
   function busy(btn, label) {
     btn.disabled = true;

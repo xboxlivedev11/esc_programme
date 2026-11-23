@@ -49,6 +49,9 @@ R1–R9 and P1–P7). Update it whenever a decision changes, and say who decided
 - Production data folder: `D:\esc_data` (D: has the free space; C: is tight).
 
 ## Gotchas learned
+- **`replaceChildren(x)` / `append(x)` with a `null` argument prints the word "null"** in the page (the `h()` helper skips null children, the raw DOM calls do not). Filter with `.filter(Boolean)`. This was the stray "null" on the login screen.
+- **Run `cargo test` with `TEMP` and `TMP` on D:** (`$env:TEMP='D:\esc_test_tmp'`). C: is nearly full (3.9 GB free on 2026-11-23) and the relay's disk-space guard answers 507 in the upload tests, so `quota_rules_receive_refuse_recycle` and `voice_message_durations_reach_both_views` fail on C:.
+- **Test vectors are data, not code**: `server/tests/vectors/*.txt` are generated with OS-native .NET (PowerShell 7) or OpenSSL as independent oracles, plus RFC text fetched with `curl`. Never type vectors from memory (the RFC 6979 `s` for "sample" was misremembered once).
 
 - PowerShell `-replace` is case-insensitive; use `-creplace` for code renames.
 - The app's `rpc(m, args)` puts `i`/`m` last so arguments can't overwrite them. Never use `m` or
